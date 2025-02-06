@@ -41,6 +41,7 @@ const UpdatePassword = lazyImport(() => import('./pages/auth/update-password'));
 const AcceptInvite = lazyImport(() => import('./pages/auth/accept-invite'));
 const NotFound = lazyImport(() => import('./pages/not-found'));
 
+const LandingPage = lazyImport(() => import('./pages/landing'));
 
 // Protected route wrapper without additional Suspense
 const Protected = ({ children }) => (
@@ -52,6 +53,8 @@ const AppRoutes = () => {
     <CustomSuspense>
       <Routes>
         <Route element={<BlankLayout />}>
+          <Route path="/" element={<LandingPage />} />
+
           <Route path="/signin" element={<SignIn />} />
           <Route path="/signup" element={<SignUp />} />
           <Route path="/forgot-password" element={<ForgotPassword />} />
