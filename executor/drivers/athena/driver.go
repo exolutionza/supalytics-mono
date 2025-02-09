@@ -6,9 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"time"
+	"supalytics-executor/driver"
 
-	connector "supalytics-executor/drivers"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
@@ -17,16 +17,16 @@ import (
 )
 
 type Driver struct {
-	connector.BaseConnector
+	driver.BaseDriver
 	client *athena.Client
 	config *Config
 }
 
 func init() {
-	connector.Register(connector.AthenaType, New)
+	driver.Register(driver.AthenaType, New)
 }
 
-func New(config json.RawMessage) (connector.Connector, error) {
+func New(config json.RawMessage) (driver.Driver, error) {
 	cfg, err := FromJSON(config)
 	if err != nil {
 		return nil, err
@@ -54,7 +54,7 @@ func (d *Driver) Connect(ctx context.Context) error {
 	return nil
 }
 
-func (d *Driver) Query(ctx context.Context, query string, args ...interface{}) (*connector.QueryResult, error) {
+func (d *Driver) Query(ctx context.Context, query string, args ...interface{}) (*driver.QueryResult, error) {
 	// Start query execution
 	startInput := &athena.StartQueryExecutionInput{
 		QueryString: &query,
@@ -97,12 +97,12 @@ func (d *Driver) Query(ctx context.Context, query string, args ...interface{}) (
 		time.Sleep(time.Second)
 	}
 
-	return &connector.QueryResult{
+	return &driver.QueryResult{
 		Stream: d.streamResults(ctx, queryID),
 	}, nil
 }
 
-func (d *Driver) streamResults(ctx context.Context, queryID *string) connector.RowStream {
+func (d *Driver) streamResults(ctx context.Context, queryID *string) driver.RowStream {
 	return func(yield func(columns []string, row []interface{}) error) error {
 		var columnInfo []types.ColumnInfo
 		var nextToken *string

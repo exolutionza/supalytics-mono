@@ -10,23 +10,23 @@ import (
 	"io"
 	"time"
 
-	connector "supalytics-executor/drivers"
+	driver "supalytics-executor/driver"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
 type Driver struct {
-	connector.BaseConnector
+	driver.BaseDriver
 	config *Config
 	conn   *pgx.Conn
 }
 
 func init() {
-	connector.Register(connector.PostgresType, New)
+	driver.Register(driver.PostgresType, New)
 }
 
-func New(config json.RawMessage) (connector.Connector, error) {
+func New(config json.RawMessage) (driver.Driver, error) {
 	cfg, err := FromJSON(config)
 	if err != nil {
 		return nil, err
@@ -45,6 +45,10 @@ func (d *Driver) buildConfig() (*pgx.ConnConfig, error) {
 
 	// Set reasonable timeout values
 	config.ConnectTimeout = 10 * time.Second
+
+	// ->  ERROR: prepared statement "..." already exists (SQLSTATE 42P05)
+	// https://github.com/jackc/pgx/issues/1847#issuecomment-2211786103
+	config.DefaultQueryExecMode = pgx.QueryExecModeCacheDescribe
 
 	// Initialize RuntimeParams if nil
 	if config.RuntimeParams == nil {
@@ -114,44 +118,51 @@ func (d *Driver) Connect(ctx context.Context) error {
 	return nil
 }
 
-func (d *Driver) Query(ctx context.Context, query string, args ...interface{}) (*connector.QueryResult, error) {
+func (d *Driver) Query(ctx context.Context, query string, args ...interface{}) (*driver.QueryResult, error) {
 	// Execute query
 	rows, err := d.conn.Query(ctx, query, args...)
 	if err != nil {
-		if isRetryableError(err) {
-			return &connector.QueryResult{
-				Error: fmt.Sprintf("retryable error: %v", err),
-			}, nil
-		}
-		return &connector.QueryResult{
-			Error: fmt.Sprintf("failed to execute query: %v", err),
-		}, nil
+		// Instead of returning a QueryResult with an error message and nil Stream,
+		// return a proper error.
+		return nil, fmt.Errorf("failed to execute query: %w", err)
 	}
 
-	return &connector.QueryResult{
+	return &driver.QueryResult{
+		// Set the Stream field to a function that yields the header once and then the rows.
 		Stream: d.streamResults(ctx, rows),
 	}, nil
 }
 
-func (d *Driver) streamResults(ctx context.Context, rows pgx.Rows) connector.RowStream {
+// streamResults returns a RowStream that first yields the header (columns)
+// once (with a nil row) and then yields each row with nil columns.
+func (d *Driver) streamResults(ctx context.Context, rows pgx.Rows) driver.RowStream {
 	return func(yield func(columns []string, row []interface{}) error) error {
 		defer rows.Close()
 
-		// Get and yield schema first
+		// Get schema (field descriptions) and build the header.
 		fields := rows.FieldDescriptions()
-		columns := make([]string, len(fields))
+		header := make([]string, len(fields))
 		for i, field := range fields {
-			columns[i] = string(field.Name)
+			header[i] = string(field.Name)
 		}
 
-		// Stream rows
+		// Yield the header once.
+		if err := yield(header, nil); err != nil {
+			if err == io.EOF {
+				return nil
+			}
+			return err
+		}
+
+		// Stream rows.
 		for rows.Next() {
 			values, err := rows.Values()
 			if err != nil {
 				return fmt.Errorf("failed to read row: %w", err)
 			}
 
-			if err := yield(columns, values); err != nil {
+			// Yield nil for columns (header already sent) and send row values.
+			if err := yield(nil, values); err != nil {
 				if err == io.EOF {
 					return nil
 				}
@@ -174,7 +185,7 @@ func (d *Driver) Close() error {
 	return nil
 }
 
-// isRetryableError checks if the error is retryable
+// isRetryableError checks if the error is retryable.
 func isRetryableError(err error) bool {
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) {

@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"io"
 	"strings"
-	connector "supalytics-executor/drivers"
+
+	driver "supalytics-executor/driver"
+
 	"time"
 
 	"cloud.google.com/go/bigquery"
@@ -17,17 +19,17 @@ import (
 )
 
 type Driver struct {
-	connector.BaseConnector
+	driver.BaseDriver
 	client  *bigquery.Client
 	config  *Config
 	dataset *bigquery.Dataset
 }
 
 func init() {
-	connector.Register(connector.BigQueryType, New)
+	driver.Register(driver.BigQueryType, New)
 }
 
-func New(config json.RawMessage) (connector.Connector, error) {
+func New(config json.RawMessage) (driver.Driver, error) {
 	cfg, err := FromJSON(config)
 	if err != nil {
 		return nil, err
@@ -58,7 +60,7 @@ func (d *Driver) Connect(ctx context.Context) error {
 	return nil
 }
 
-func (d *Driver) Query(ctx context.Context, query string, args ...interface{}) (*connector.QueryResult, error) {
+func (d *Driver) Query(ctx context.Context, query string, args ...interface{}) (*driver.QueryResult, error) {
 	query = replaceQueryPlaceholders(query, args...)
 
 	q := d.client.Query(query)
@@ -81,12 +83,12 @@ func (d *Driver) Query(ctx context.Context, query string, args ...interface{}) (
 		return nil, fmt.Errorf("query failed: %w", err)
 	}
 
-	return &connector.QueryResult{
+	return &driver.QueryResult{
 		Stream: d.streamResults(ctx, job),
 	}, nil
 }
 
-func (d *Driver) streamResults(ctx context.Context, job *bigquery.Job) connector.RowStream {
+func (d *Driver) streamResults(ctx context.Context, job *bigquery.Job) driver.RowStream {
 	return func(yield func(columns []string, row []interface{}) error) error {
 		it, err := job.Read(ctx)
 		if err != nil {

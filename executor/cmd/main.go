@@ -4,72 +4,65 @@ import (
 	"context"
 	"fmt"
 	"log"
-	connector "supalytics-executor/drivers"
-	"supalytics-executor/drivers/postgres"
-	"time"
 
-	_ "github.com/lib/pq"
+	executor "supalytics-executor/runner"
+
+	"github.com/BurntSushi/toml"
+	"github.com/supabase-community/supabase-go"
 )
 
-const (
-	dbHost     = "aws-0-eu-central-1.pooler.supabase.com"
-	dbPort     = 6543
-	dbUser     = "postgres.djdqojnjcolkhiazvfve"
-	dbPassword = "_9Z4qWDiCBRZ2fu"
-	dbName     = "postgres"
-)
+// Config holds the configuration details from config.toml.
+type Config struct {
+	SupabaseURL string `toml:"supabase_url"`
+	SupabaseKey string `toml:"supabase_key"`
+	// Add any other configuration fields as needed.
+}
 
 func main() {
-	// Create postgres config
-	pgConfig := &postgres.Config{
-		Host:            dbHost,
-		Port:            dbPort,
-		Database:        dbName,
-		Username:        dbUser,
-		Password:        dbPassword,
-		MaxOpenConns:    10,
-		MaxIdleConns:    5,
-		ConnMaxLifetime: 5 * time.Minute,
+	// Load configuration from config.toml.
+	var cfg Config
+	if _, err := toml.DecodeFile("config.toml", &cfg); err != nil {
+		log.Fatalf("Failed to load config.toml: %v", err)
 	}
 
-	// Convert to JSON
-	configJSON, err := pgConfig.ToJSON()
+	// Create a Supabase client using the config values.
+	client, err := supabase.NewClient(cfg.SupabaseURL, cfg.SupabaseKey, &supabase.ClientOptions{})
 	if err != nil {
-		log.Fatalf("Failed to marshal config: %v", err)
+		log.Fatalf("Cannot initialize client: %v", err)
 	}
 
-	// Create connector
-	conn, err := connector.New(connector.PostgresType, configJSON)
-	if err != nil {
-		log.Fatalf("Failed to create connector: %v", err)
-	}
-	fmt.Println(conn)
+	// Replace with your actual query ID from the queries table.
+	queryID := "aec65753-66e0-473a-aabb-edcfc7a16421"
 
-	// Connect to database
+	// Define the template data to be used for templating the query content.
+	templateData := map[string]interface{}{
+		"Con": "connectors",
+		// Add more key-value pairs as needed.
+	}
+
+	// Create a context.
 	ctx := context.Background()
-	if err := conn.Connect(ctx); err != nil {
-		log.Fatalf("Failed to connect: %v", err)
-	}
-	defer conn.Close()
-	fmt.Println("connected")
 
-	// Test query
-	result, err := conn.Query(ctx, "SELECT version()")
+	// Call the ExecuteQuery function which returns a StreamResult.
+	stream, err := executor.ExecuteQuery(ctx, queryID, templateData, client)
 	if err != nil {
-		log.Fatalf("Query failed: %v", err)
+		log.Fatalf("Query execution failed: %v", err)
 	}
-	fmt.Println(result)
-	// Print results
-	err = result.Stream(func(columns []string, row []interface{}) error {
+	// Ensure that the stream is closed when we're done.
+	defer stream.Close()
+
+	// Process the streamed results.
+	err = stream.Stream(func(columns []string, row []interface{}) error {
+		// If columns are provided, print them (they may be sent once as a header).
 		if columns != nil {
 			fmt.Println("Columns:", columns)
-			return nil
+		} else {
+			// Otherwise, print each row as it comes.
+			fmt.Println("Row:", row)
 		}
-		fmt.Println("Row:", row)
 		return nil
 	})
 	if err != nil {
-		log.Fatalf("Failed to stream results: %v", err)
+		log.Fatalf("Streaming failed: %v", err)
 	}
-
 }
