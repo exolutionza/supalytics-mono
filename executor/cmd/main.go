@@ -33,6 +33,29 @@ const (
 	maxMessageSize = 512 * 1024 // 512KB
 )
 
+// MessageType represents different types of messages sent to the client
+type MessageType string
+
+const (
+	MessageTypeMetadata MessageType = "metadata"
+	MessageTypeColumns  MessageType = "columns"
+	MessageTypeRow      MessageType = "row"
+	MessageTypeError    MessageType = "error"
+	MessageTypeComplete MessageType = "complete"
+)
+
+// WSMessage represents the standardized message format
+type WSMessage struct {
+	Type    MessageType            `json:"type"`
+	Payload map[string]interface{} `json:"payload,omitempty"`
+}
+
+// QueryMetadata represents the metadata about a query execution
+type QueryMetadata struct {
+	TotalRows int64    `json:"totalRows"`
+	Columns   []string `json:"columns"`
+}
+
 // Config holds the configuration details
 type Config struct {
 	SupabaseURL string `toml:"supabase_url"`
@@ -204,17 +227,60 @@ func (s *Server) handleQueryRequest(ctx context.Context, conn *websocket.Conn, r
 	}
 	defer stream.Close()
 
-	return stream.Stream(func(columns []string, row []interface{}) error {
-		message := make(map[string]interface{})
-		if columns != nil {
-			message["columns"] = columns
-		} else {
-			message["row"] = row
-		}
+	// Track metadata
+	var totalRows int64
 
-		conn.SetWriteDeadline(time.Now().Add(writeWait))
-		return conn.WriteJSON(message)
+	err = stream.Stream(func(cols []string, row []interface{}) error {
+		if cols != nil {
+			// Send metadata message
+			metadata := QueryMetadata{
+				Columns:   cols,
+				TotalRows: 0, // Will be updated at completion
+			}
+			msg := WSMessage{
+				Type: MessageTypeMetadata,
+				Payload: map[string]interface{}{
+					"metadata": metadata,
+				},
+			}
+			if err := s.sendMessage(conn, msg); err != nil {
+				return err
+			}
+		} else if row != nil {
+			totalRows++
+			msg := WSMessage{
+				Type: MessageTypeRow,
+				Payload: map[string]interface{}{
+					"data": row,
+				},
+			}
+			if err := s.sendMessage(conn, msg); err != nil {
+				return err
+			}
+		}
+		return nil
 	})
+
+	if err != nil {
+		// Send error message
+		errMsg := WSMessage{
+			Type: MessageTypeError,
+			Payload: map[string]interface{}{
+				"error": err.Error(),
+			},
+		}
+		s.sendMessage(conn, errMsg)
+		return err
+	}
+
+	// Send completion message with total rows
+	completeMsg := WSMessage{
+		Type: MessageTypeComplete,
+		Payload: map[string]interface{}{
+			"totalRows": totalRows,
+		},
+	}
+	return s.sendMessage(conn, completeMsg)
 }
 
 // writePingMessages sends periodic ping messages to keep the connection alive
@@ -230,10 +296,21 @@ func (s *Server) writePingMessages(conn *websocket.Conn) {
 	}
 }
 
+// sendMessage sends a message to the WebSocket connection
+func (s *Server) sendMessage(conn *websocket.Conn, msg WSMessage) error {
+	conn.SetWriteDeadline(time.Now().Add(writeWait))
+	return conn.WriteJSON(msg)
+}
+
 // sendError sends an error message to the client
 func (s *Server) sendError(conn *websocket.Conn, message string) {
-	conn.SetWriteDeadline(time.Now().Add(writeWait))
-	conn.WriteJSON(map[string]string{"error": message})
+	msg := WSMessage{
+		Type: MessageTypeError,
+		Payload: map[string]interface{}{
+			"error": message,
+		},
+	}
+	s.sendMessage(conn, msg)
 }
 
 func main() {

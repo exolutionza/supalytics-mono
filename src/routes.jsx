@@ -42,6 +42,7 @@ const AcceptInvite = lazyImport(() => import('./pages/auth/accept-invite'));
 const NotFound = lazyImport(() => import('./pages/not-found'));
 
 const LandingPage = lazyImport(() => import('./pages/landing'));
+const GridLayout = lazyImport(() => import('./grid-layout'));
 
 // Protected route wrapper without additional Suspense
 const Protected = ({ children }) => (
@@ -54,6 +55,7 @@ const AppRoutes = () => {
       <Routes>
         <Route element={<BlankLayout />}>
           <Route path="/" element={<LandingPage />} />
+          <Route path="/grid" element={<GridLayout />} />
 
           <Route path="/signin" element={<SignIn />} />
           <Route path="/signup" element={<SignUp />} />

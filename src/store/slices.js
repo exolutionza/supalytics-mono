@@ -1,6 +1,9 @@
 // slices.js
-
-import { createSlice, createAsyncThunk, createEntityAdapter } from '@reduxjs/toolkit';
+import {
+  createSlice,
+  createAsyncThunk,
+  createEntityAdapter
+} from '@reduxjs/toolkit';
 import supabase from '@/services/supabase-client';
 import _ from 'lodash'; // for deep comparisons
 
@@ -78,7 +81,9 @@ const widgetsAdapter = createEntityAdapter({
 const widgetsInitialState = widgetsAdapter.getInitialState({
   loading: false,
   error: null,
-  runtime: {}
+  runtime: {},
+  // ADDED: This is our new map of widget -> [variable_ids]
+  paramDependencies: {} 
 });
 
 export const fetchWidgetsForDashboard = createAsyncThunk(
@@ -90,6 +95,30 @@ export const fetchWidgetsForDashboard = createAsyncThunk(
       .eq('dashboard_id', dashboardId);
     if (error) throw new Error(error.message);
     return data;
+  }
+);
+
+// ADDED: New thunk to fetch widget_templates for the same dashboard
+export const fetchWidgetTemplatesForDashboard = createAsyncThunk(
+  'widgets/fetchTemplatesForDashboard',
+  async (dashboardId) => {
+    // For example, we can do a sub-select or multiple queries.
+    // We'll assume a single query that returns all widget_templates for the widgets in that dashboard.
+    const { data: widgetsData, error: widgetsErr } = await supabase
+      .from('widgets')
+      .select('id')
+      .eq('dashboard_id', dashboardId);
+
+    if (widgetsErr) throw new Error(widgetsErr.message);
+    const widgetIds = widgetsData.map((w) => w.id);
+
+    const { data, error } = await supabase
+      .from('widget_templates')
+      .select('*')
+      .in('widget_id', widgetIds);
+
+    if (error) throw new Error(error.message);
+    return data; // array of { id, widget_id, query_parameter_id, variable_id, variable_key, ... }
   }
 );
 
@@ -186,6 +215,12 @@ const widgetsSlice = createSlice({
       }
       state.runtime[widgetId].lastUsedParams = lastUsedParams;
     },
+
+    // ADDED: A new reducer to store widget dependency info
+    setWidgetDependencies(state, action) {
+      // action.payload should be an object like: { [widgetId]: [varId1, varId2, ...], ... }
+      state.paramDependencies = action.payload;
+    },
   },
   extraReducers: (builder) => {
     builder
@@ -214,8 +249,30 @@ const widgetsSlice = createSlice({
       .addCase(fetchWidgetsForDashboard.rejected, (state, action) => {
         state.loading = false;
         state.error = action.error.message;
+      })
+
+      // ADDED: When templates are fetched, build the paramDependencies map.
+      .addCase(fetchWidgetTemplatesForDashboard.fulfilled, (state, action) => {
+        const templates = action.payload; // array of widget_templates rows
+        const depMap = {};
+        templates.forEach((t) => {
+          const wId = t.widget_id;
+          if (!depMap[wId]) {
+            depMap[wId] = [];
+          }
+          // Avoid duplicates if you have multiple param references to the same variable
+          if (!depMap[wId].includes(t.variable_id)) {
+            depMap[wId].push(t.variable_id);
+          }
+        });
+
+        state.paramDependencies = depMap;
+      })
+      .addCase(fetchWidgetTemplatesForDashboard.rejected, (state, action) => {
+        // You might want to store an error or handle accordingly
+        state.error = action.error.message;
       });
-  }
+  },
 });
 
 /* ===========================================================================
@@ -235,7 +292,8 @@ export const {
   setWidgetComplete,
   setWidgetError,
   setWidgetStreamingStatus,
-  setWidgetLastUsedParams
+  setWidgetLastUsedParams,
+  setWidgetDependencies // ADDED
 } = widgetsSlice.actions;
 
 // Combine slices for store
@@ -244,3 +302,6 @@ export const slicesReducer = {
   widgets: widgetsSlice.reducer,
   globalOutputs: globalOutputsSlice.reducer
 };
+
+// Export the adapters if needed by selectors
+export { dashboardsAdapter, widgetsAdapter };

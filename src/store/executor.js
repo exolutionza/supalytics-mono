@@ -11,11 +11,12 @@ import {
   setWidgetComplete,
   setWidgetError,
   setWidgetStreamingStatus,
-  setWidgetLastUsedParams
-} from './slices'; // from the combined file
+  setWidgetLastUsedParams,
+  updateGlobalOutput // <-- make sure we have this
+} from './slices';
 
 // Import the serialization logic
-import { serializeOutputData } from './templates';
+import { serializeOutputData } from './serializers';
 
 /**
  * If you want a function to gather raw param data for comparison:
@@ -27,37 +28,51 @@ function gatherRawParams(widgetId, state) {
   const rawParams = {};
   widgetTemplates.forEach((t) => {
     const paramName = t.variable_key || t.variable_id;
-    const val = t.index != null ? pickIndexed(globalOutputs[t.variable_id], t.index)
-                                : globalOutputs[t.variable_id];
+    const val = t.index != null
+      ? pickIndexed(globalOutputs[t.variable_id], t.index)
+      : globalOutputs[t.variable_id];
     rawParams[paramName] = val;
   });
   return rawParams;
 }
+
 function pickIndexed(obj, idx) {
-  // same approach as findValueByIndex, or a simpler version if you only store arrays
   if (Array.isArray(obj)) return obj[idx];
-  return obj;
+  return obj; // or something more robust
 }
 
 /**
- * reexecuteIfNeeded logic (deep compare):
+ * Instead of scanning ALL widgets, we only re-execute
+ * the ones that depend on the changed variables.
  */
-function reexecuteIfNeeded(thunkAPI, finishedWidgetId) {
+function reexecuteIfNeeded(thunkAPI, finishedWidgetId, changedVariableIds = []) {
   const state = thunkAPI.getState();
   const { widgets } = state;
+  const { paramDependencies, runtime } = widgets;
 
-  Object.keys(widgets.entities).forEach((wid) => {
-    if (wid === finishedWidgetId) return; // skip the one that just finished
+  // paramDependencies: { [widgetId]: [varId1, varId2, ...] }
+  const widgetsToCheck = new Set();
 
-    const runtime = widgets.runtime[wid];
-    if (!runtime) return;
+  changedVariableIds.forEach((varId) => {
+    // For each widget => varIdList
+    for (const [wId, varIdList] of Object.entries(paramDependencies || {})) {
+      if (varIdList.includes(varId)) {
+        widgetsToCheck.add(wId);
+      }
+    }
+  });
 
-    const newParams = gatherRawParams(wid, state);
-    const oldParams = runtime.lastUsedParams || {};
+  widgetsToCheck.forEach((widgetId) => {
+    if (widgetId === finishedWidgetId) return; // skip the just-finished widget
+
+    const rt = runtime[widgetId];
+    if (!rt) return;
+
+    const newParams = gatherRawParams(widgetId, state);
+    const oldParams = rt.lastUsedParams || {};
 
     if (!_.isEqual(newParams, oldParams)) {
-      // Dispatch a new execute
-      thunkAPI.dispatch(executeWidget({ widgetId: wid }));
+      thunkAPI.dispatch(executeWidget({ widgetId }));
     }
   });
 }
@@ -87,66 +102,99 @@ export const executeWidget = createAsyncThunk(
       const serializedParams = {};
       widgetTemplates.forEach((t) => {
         const outputData = state.globalOutputs[t.variable_id];
-        serializedParams[t.variable_key || t.variable_id] = serializeOutputData(outputData, t);
+        serializedParams[t.variable_key || t.variable_id] =
+          serializeOutputData(outputData, t);
       });
 
       // Store the rawParams in runtime
-      thunkAPI.dispatch(setWidgetLastUsedParams({ widgetId, lastUsedParams: rawParams }));
+      thunkAPI.dispatch(
+        setWidgetLastUsedParams({ widgetId, lastUsedParams: rawParams })
+      );
 
-      // Connect & execute
+      // Connect & execute (WebSocket endpoint is just an example)
       const socket = await websocketService.connect(`/api/execute/${widget.id}`);
-      socket.send(JSON.stringify({
-        type: 'EXECUTE_REQUEST',
-        payload: {
-          queryId: widget.query_id,
-          parameters: serializedParams
-        }
-      }));
+      socket.send(
+        JSON.stringify({
+          type: 'EXECUTE_REQUEST',
+          payload: {
+            queryId: widget.query_id,
+            parameters: serializedParams
+          }
+        })
+      );
 
       socket.onmessage = (event) => {
         const message = JSON.parse(event.data);
         switch (message.type) {
           case 'METADATA':
-            thunkAPI.dispatch(setWidgetMetadata({
-              widgetId,
-              metadata: {
-                columns: message.payload.columns,
-                columnOrder: message.payload.columns.map((c) => c.name),
-                totalRows: message.payload.totalRows,
-              }
-            }));
+            thunkAPI.dispatch(
+              setWidgetMetadata({
+                widgetId,
+                metadata: {
+                  columns: message.payload.columns,
+                  columnOrder: message.payload.columns.map((c) => c.name),
+                  totalRows: message.payload.totalRows
+                }
+              })
+            );
             break;
 
-          case 'BATCH':
-            thunkAPI.dispatch(processDataBatch({
-              widgetId,
-              batch: {
-                rows: message.payload.rows,
-                rowOrder: message.payload.rowOrder ||
-                  message.payload.rows.map((_, idx) => idx),
-              },
-            }));
-            break;
+          case 'COMPLETE': {
+            thunkAPI.dispatch(
+              setWidgetComplete({ widgetId, summary: message.payload })
+            );
 
-          case 'COMPLETE':
-            thunkAPI.dispatch(setWidgetComplete({ widgetId, summary: message.payload }));
+            // ---------------------------------------------------------------------------------
+            // TODO:
+            // Suppose the backend includes some keys in message.payload (e.g., "foo", "bar")
+            // that you want to store in globalOutputs. We'll compare old vs. new values.
+            // If they differ, we do updateGlobalOutput(...) and add them to changedVars.
+            // ---------------------------------------------------------------------------------
+            const changedVars = [];
+            const globalOutputsState = thunkAPI.getState().globalOutputs;
+
+              // Now re-check only widgets that depend on any changed variables
+            if (changedVars.length > 0) {
+              reexecuteIfNeeded(thunkAPI, widgetId, changedVars);
+            }
+
             socket.close();
-            reexecuteIfNeeded(thunkAPI, widgetId);
             break;
+          }
 
+          // case 'BATCH':
+          //   thunkAPI.dispatch(
+          //     processDataBatch({
+          //       widgetId,
+          //       batch: {
+          //         rows: message.payload.rows,
+          //         rowOrder:
+          //           message.payload.rowOrder ||
+          //           message.payload.rows.map((_, idx) => idx)
+          //       }
+          //     })
+          //   );
+          //   break;
+          
           case 'ERROR':
-            thunkAPI.dispatch(setWidgetError({ widgetId, error: message.payload.error }));
+            thunkAPI.dispatch(
+              setWidgetError({ widgetId, error: message.payload.error })
+            );
             socket.close();
             break;
         }
       };
 
       socket.onerror = () => {
-        thunkAPI.dispatch(setWidgetError({ widgetId, error: 'WebSocket connection error' }));
+        thunkAPI.dispatch(
+          setWidgetError({ widgetId, error: 'WebSocket connection error' })
+        );
       };
 
       socket.onclose = () => {
-        thunkAPI.dispatch(setWidgetStreamingStatus({ widgetId, isStreaming: false }));
+        thunkAPI.dispatch(
+          setWidgetStreamingStatus({ widgetId, isStreaming: false })
+        );
       };
 
       return { widgetId, status: 'streaming' };
