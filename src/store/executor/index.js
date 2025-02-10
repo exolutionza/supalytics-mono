@@ -6,14 +6,14 @@ import { websocketService } from '@/services/websocket-service';
 
 // Import pieces from our slices
 import {
-  processDataBatch,
   setWidgetMetadata,
   setWidgetComplete,
   setWidgetError,
   setWidgetStreamingStatus,
   setWidgetLastUsedParams,
-  updateGlobalOutput // <-- make sure we have this
-} from './slices';
+} from '@/store/slices/widgets';
+
+import { updateGlobalOutput } from '@/store/slices/global-outputs';
 
 // Import the serialization logic
 import { serializeOutputData } from './serializers';

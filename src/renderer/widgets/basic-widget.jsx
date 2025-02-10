@@ -4,6 +4,8 @@ import { useSelector } from 'react-redux';
 import { selectWidgetOrderedData } from '@/store/selectors';
 
 const BasicWidget = ({ widget }) => {
+
+  console.log("here")
   // Grab all widget data (rows + metadata) from Redux
   const widgetData = useSelector((state) => selectWidgetOrderedData(widget.id)(state));
 

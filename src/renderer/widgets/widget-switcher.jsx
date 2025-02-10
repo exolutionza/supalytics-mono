@@ -1,7 +1,6 @@
 import React from 'react';
 import { useSelector } from 'react-redux';
-import { selectWidgetById } from '@/store/slices';
-import { selectWidgetProgress, selectWidgetOrderedData } from '@/store/selectors';
+import { selectWidgetProgress, selectWidgetOrderedData, selectWidgetById } from '@/store/selectors';
 
 import BasicWidget from './basic-widget';
 
@@ -26,7 +25,7 @@ const WidgetSwitcher = ({ widgetId }) => {
       </div>
     );
   }
-
+  console.log("HEREEE")
   switch (widget.type) {
     case 'BasicWidget':
       return <BasicWidget widget={widget} data={data} />;
