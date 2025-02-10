@@ -1,12 +1,14 @@
 // src/components/BasicWidget.js
 import React from 'react';
 import { useSelector } from 'react-redux';
-import { selectWidgetMetadata } from '../store/selectors';
+import { selectWidgetOrderedData } from '@/store/selectors';
 
-const BasicWidget = ({ widget, data }) => {
-  const metadata = useSelector((state) => selectWidgetMetadata(widget.id));
+const BasicWidget = ({ widget }) => {
+  // Grab all widget data (rows + metadata) from Redux
+  const widgetData = useSelector((state) => selectWidgetOrderedData(widget.id)(state));
 
-  if (!data || !metadata) {
+  // If we have no data (rows or metadata), display a fallback
+  if (!widgetData) {
     return (
       <div className="p-4 border rounded-lg">
         <h3 className="text-lg font-medium mb-2">{widget.name}</h3>
@@ -15,12 +17,12 @@ const BasicWidget = ({ widget, data }) => {
     );
   }
 
-  const { rows, columns } = data;
+  const { rows, columns, summary } = widgetData;
 
   return (
     <div className="p-4 border rounded-lg">
       <h3 className="text-lg font-medium mb-4">{widget.name}</h3>
-      
+
       <div className="overflow-x-auto">
         <table className="min-w-full divide-y divide-gray-200">
           <thead>
@@ -52,10 +54,10 @@ const BasicWidget = ({ widget, data }) => {
         </table>
       </div>
 
-      {widget.showSummary && data.summary && (
+      {widget.showSummary && summary && (
         <div className="mt-4 p-4 bg-gray-50 rounded">
           <h4 className="text-sm font-medium mb-2">Summary</h4>
-          <pre className="text-xs">{JSON.stringify(data.summary, null, 2)}</pre>
+          <pre className="text-xs">{JSON.stringify(summary, null, 2)}</pre>
         </div>
       )}
     </div>

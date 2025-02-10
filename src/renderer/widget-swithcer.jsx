@@ -1,7 +1,7 @@
 import React from 'react';
 import { useSelector } from 'react-redux';
-import { selectWidgetById } from '@/redux/slices';
-import { selectWidgetProgress, selectWidgetOrderedData } from '@/redux/selectors';
+import { selectWidgetById } from '@/store/slices';
+import { selectWidgetProgress, selectWidgetOrderedData } from '@/store/selectors';
 
 import BasicWidget from './basic-widget';
 

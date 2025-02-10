@@ -10,26 +10,29 @@ import (
 	"text/template"
 	"time"
 
-	// Import the shared driver package.
 	"supalytics-executor/driver"
-
-	// Import the driver implementations.
 	"supalytics-executor/drivers/athena"
 	"supalytics-executor/drivers/bigquery"
 	"supalytics-executor/drivers/postgres"
 
-	// Import the Supabase client package.
 	"github.com/supabase-community/supabase-go"
 )
 
-// init registers all available driver factories explicitly.
+// Common errors
+var (
+	ErrQueryNotFound     = errors.New("query not found")
+	ErrConnectorNotFound = errors.New("connector not found")
+	ErrUnsupportedType   = errors.New("unsupported connector type")
+)
+
+// init registers all available driver factories
 func init() {
 	driver.Register(driver.PostgresType, postgres.New)
 	driver.Register(driver.BigQueryType, bigquery.New)
 	driver.Register(driver.AthenaType, athena.New)
 }
 
-// Connector represents a row from the connectors table.
+// Connector represents a database connection configuration
 type Connector struct {
 	ID                  string          `json:"id"`
 	OrganizationID      string          `json:"organization_id"`
@@ -42,7 +45,7 @@ type Connector struct {
 	UpdatedAt           time.Time       `json:"updated_at"`
 }
 
-// Query represents a row from the queries table.
+// Query represents a database query configuration
 type Query struct {
 	ID             string    `json:"id"`
 	OrganizationID string    `json:"organization_id"`
@@ -53,153 +56,177 @@ type Query struct {
 	UpdatedAt      time.Time `json:"updated_at"`
 }
 
-// queryResultWrapper wraps *driver.QueryResult so that it implements driver.Result.
-type queryResultWrapper struct {
-	qr *driver.QueryResult
-}
-
-// Stream implements the driver.Result interface by delegating to the underlying QueryResult field.
-func (q *queryResultWrapper) Stream(callback func(columns []string, row []interface{}) error) error {
-	if q.qr.Stream == nil {
-		return fmt.Errorf("stream function not implemented")
-	}
-	return q.qr.Stream(callback)
-}
-
-// StreamResult is a wrapper that exposes the underlying driver's
-// streaming result and also allows the caller to close the connection.
+// StreamResult wraps a query result and its associated driver
 type StreamResult struct {
 	driver.Result
 	drv driver.Driver
 }
 
-// Close calls the underlying driver's Close method.
+// Close closes the underlying driver connection
 func (sr *StreamResult) Close() error {
-	return sr.drv.Close()
+	if sr.drv != nil {
+		return sr.drv.Close()
+	}
+	return nil
 }
 
-// ExecuteQuery fetches a query row by its ID, templates its content using the provided templateData,
-// retrieves the corresponding connector, and then executes the templated query.
-// The caller is responsible for closing the returned StreamResult.
+// queryResultWrapper adapts driver.QueryResult to driver.Result
+type queryResultWrapper struct {
+	qr *driver.QueryResult
+}
+
+func (q *queryResultWrapper) Stream(callback func(columns []string, row []interface{}) error) error {
+	if q.qr == nil || q.qr.Stream == nil {
+		return errors.New("stream function not implemented")
+	}
+	return q.qr.Stream(callback)
+}
+
+// ExecuteQuery processes and runs a query, returning a streaming result
 func ExecuteQuery(ctx context.Context, queryID string, templateData interface{}, supaClient *supabase.Client) (*StreamResult, error) {
-	// Step 1: Retrieve the query from the "queries" table.
-	var queries []Query
-	queryResp, _, err := supaClient.
-		From("queries").
-		Select("*", "exact", false).
-		Eq("id", queryID).
-		Execute()
+	query, err := fetchQuery(ctx, queryID, supaClient)
 	if err != nil {
-		return nil, fmt.Errorf("failed to query queries table: %w", err)
+		return nil, fmt.Errorf("fetch query: %w", err)
 	}
-	if err := json.Unmarshal(queryResp, &queries); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal query response: %w", err)
-	}
-	if len(queries) == 0 {
-		return nil, errors.New("query not found")
-	}
-	qr := queries[0]
 
-	// Step 2: Use text/template to process the query content with the provided templateData.
-	tmpl, err := template.New("queryTemplate").Parse(qr.Content)
+	finalQuery, err := renderTemplate(query.Content, templateData)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse query template: %w", err)
+		return nil, fmt.Errorf("render template: %w", err)
 	}
-	var buf bytes.Buffer
-	if err := tmpl.Execute(&buf, templateData); err != nil {
-		return nil, fmt.Errorf("failed to execute query template: %w", err)
-	}
-	finalQuery := buf.String()
 
-	// Step 3: Retrieve the connector using the connector_id from the query row.
-	var connectors []Connector
-	connectorResp, _, err := supaClient.
-		From("connectors").
-		Select("*", "exact", false).
-		Eq("id", qr.ConnectorID).
-		Execute()
+	connector, err := fetchConnector(ctx, query.ConnectorID, supaClient)
 	if err != nil {
-		return nil, fmt.Errorf("failed to query connector: %w", err)
-	}
-	if err := json.Unmarshal(connectorResp, &connectors); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal connectors response: %w", err)
-	}
-	if len(connectors) == 0 {
-		return nil, errors.New("connector not found")
-	}
-	connector := connectors[0]
-
-	// Step 4: Choose the appropriate driver based on the connector type.
-	var drv driver.Driver
-	switch driver.DriverType(connector.Type) {
-	case driver.PostgresType:
-		// Unmarshal connector config into Postgres config.
-		var pgConfig postgres.Config
-		if err := json.Unmarshal(connector.Config, &pgConfig); err != nil {
-			return nil, fmt.Errorf("failed to unmarshal postgres config: %w", err)
-		}
-		configJSON, err := pgConfig.ToJSON()
-		if err != nil {
-			return nil, fmt.Errorf("failed to marshal postgres config: %w", err)
-		}
-		drv, err = driver.New(driver.PostgresType, configJSON)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create postgres driver: %w", err)
-		}
-
-	case driver.BigQueryType:
-		// Unmarshal connector config into BigQuery config.
-		bqConfig, err := bigquery.FromJSON(connector.Config)
-		if err != nil {
-			return nil, fmt.Errorf("failed to unmarshal bigquery config: %w", err)
-		}
-		configJSON, err := bqConfig.ToJSON()
-		if err != nil {
-			return nil, fmt.Errorf("failed to marshal bigquery config: %w", err)
-		}
-		drv, err = driver.New(driver.BigQueryType, configJSON)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create bigquery driver: %w", err)
-		}
-
-	case driver.AthenaType:
-		// Unmarshal connector config into Athena config.
-		athenaConfig, err := athena.FromJSON(connector.Config)
-		if err != nil {
-			return nil, fmt.Errorf("failed to unmarshal athena config: %w", err)
-		}
-		configJSON, err := athenaConfig.ToJSON()
-		if err != nil {
-			return nil, fmt.Errorf("failed to marshal athena config: %w", err)
-		}
-		drv, err = driver.New(driver.AthenaType, configJSON)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create athena driver: %w", err)
-		}
-
-	default:
-		return nil, fmt.Errorf("unsupported connector type: %s", connector.Type)
+		return nil, fmt.Errorf("fetch connector: %w", err)
 	}
 
-	// Step 5: Connect to the underlying data source.
+	drv, err := createDriver(connector)
+	if err != nil {
+		return nil, fmt.Errorf("create driver: %w", err)
+	}
+
+	// Connect and execute query
 	if err := drv.Connect(ctx); err != nil {
-		return nil, fmt.Errorf("failed to connect using driver: %w", err)
+		drv.Close()
+		return nil, fmt.Errorf("connect: %w", err)
 	}
-	// Do not defer drv.Close() here because the connection needs to remain open until the caller is done processing the stream.
 
-	// Step 6: Execute the templated query.
 	result, err := drv.Query(ctx, finalQuery)
 	if err != nil {
 		drv.Close()
-		return nil, fmt.Errorf("query execution failed: %w", err)
+		return nil, fmt.Errorf("execute query: %w", err)
 	}
 
-	// Wrap the QueryResult in our queryResultWrapper to satisfy the driver.Result interface.
-	wrappedResult := &queryResultWrapper{qr: result}
-
-	// Wrap and return the stream. The caller is responsible for calling Close().
 	return &StreamResult{
-		Result: wrappedResult,
+		Result: &queryResultWrapper{qr: result},
 		drv:    drv,
 	}, nil
+}
+
+// fetchQuery retrieves a query by ID from Supabase
+func fetchQuery(ctx context.Context, queryID string, client *supabase.Client) (*Query, error) {
+	var queries []Query
+	resp, _, err := client.From("queries").Select("*", "exact", false).Eq("id", queryID).Execute()
+	if err != nil {
+		return nil, err
+	}
+
+	if err := json.Unmarshal(resp, &queries); err != nil {
+		return nil, err
+	}
+
+	if len(queries) == 0 {
+		return nil, ErrQueryNotFound
+	}
+
+	return &queries[0], nil
+}
+
+// fetchConnector retrieves a connector by ID from Supabase
+func fetchConnector(ctx context.Context, connectorID string, client *supabase.Client) (*Connector, error) {
+	var connectors []Connector
+	resp, _, err := client.From("connectors").Select("*", "exact", false).Eq("id", connectorID).Execute()
+	if err != nil {
+		return nil, err
+	}
+
+	if err := json.Unmarshal(resp, &connectors); err != nil {
+		return nil, err
+	}
+
+	if len(connectors) == 0 {
+		return nil, ErrConnectorNotFound
+	}
+
+	return &connectors[0], nil
+}
+
+// renderTemplate processes the query template with provided data
+func renderTemplate(queryContent string, data interface{}) (string, error) {
+	tmpl, err := template.New("queryTemplate").Parse(queryContent)
+	if err != nil {
+		return "", err
+	}
+
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, data); err != nil {
+		return "", err
+	}
+
+	return buf.String(), nil
+}
+
+// createDriver instantiates the appropriate database driver based on connector type
+func createDriver(connector *Connector) (driver.Driver, error) {
+	switch driver.DriverType(connector.Type) {
+	case driver.PostgresType:
+		return createPostgresDriver(connector.Config)
+	case driver.BigQueryType:
+		return createBigQueryDriver(connector.Config)
+	case driver.AthenaType:
+		return createAthenaDriver(connector.Config)
+	default:
+		return nil, fmt.Errorf("%w: %s", ErrUnsupportedType, connector.Type)
+	}
+}
+
+func createPostgresDriver(config json.RawMessage) (driver.Driver, error) {
+	var pgConfig postgres.Config
+	if err := json.Unmarshal(config, &pgConfig); err != nil {
+		return nil, err
+	}
+
+	configJSON, err := pgConfig.ToJSON()
+	if err != nil {
+		return nil, err
+	}
+
+	return driver.New(driver.PostgresType, configJSON)
+}
+
+func createBigQueryDriver(config json.RawMessage) (driver.Driver, error) {
+	bqConfig, err := bigquery.FromJSON(config)
+	if err != nil {
+		return nil, err
+	}
+
+	configJSON, err := bqConfig.ToJSON()
+	if err != nil {
+		return nil, err
+	}
+
+	return driver.New(driver.BigQueryType, configJSON)
+}
+
+func createAthenaDriver(config json.RawMessage) (driver.Driver, error) {
+	athenaConfig, err := athena.FromJSON(config)
+	if err != nil {
+		return nil, err
+	}
+
+	configJSON, err := athenaConfig.ToJSON()
+	if err != nil {
+		return nil, err
+	}
+
+	return driver.New(driver.AthenaType, configJSON)
 }
