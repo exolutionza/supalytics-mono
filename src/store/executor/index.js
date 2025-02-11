@@ -94,8 +94,8 @@ export const executeWidget = createAsyncThunk(
 
       return await new Promise((resolve, reject) => {
         const handleMessage = (message) => {
-          if (isFinished) {
-            console.log(`[Executor] Ignoring message after completion for widget ${widgetId}`);
+          if (isFinished && message?.payload?.status != "completed") {
+            console.log(`[Executor] Ignoring message after completion for widget ${widgetId} `, message);
             return;
           }
 

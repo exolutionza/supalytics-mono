@@ -145,11 +145,43 @@ export const fetchWidgetLocations = createAsyncThunk(
 export const upsertWidgetLocation = createAsyncThunk(
   'widgetLocations/upsertWidgetLocation',
   async (location) => {
+    // First try to find existing location
+    const { data: existingLocation } = await supabase
+      .from('widget_locations')
+      .select('*')
+      .eq('widget_id', location.widget_id)
+      .eq('screen_size', location.screen_size || 'default')
+      .maybeSingle();
+
+    const sanitizedLocation = {
+      ...existingLocation, // Keep existing fields if any
+      ...location, // Override with new values
+      screen_size: location.screen_size || 'default',
+      config: {
+        ...(existingLocation?.config || {}),
+        ...(location.config || {}),
+      }
+    };
+
+    // If we found an existing location, make sure to include its ID
+    if (existingLocation?.id) {
+      sanitizedLocation.id = existingLocation.id;
+    }
+
+    console.log('Upserting location:', sanitizedLocation);
+
     const { data, error } = await supabase
       .from('widget_locations')
-      .upsert(location)
-      .single();
-    if (error) throw new Error(error.message);
+      .upsert(sanitizedLocation)
+      .select() // Add select() to return the updated record
+      .maybeSingle();
+
+    if (error) {
+      console.error('Upsert error:', error);
+      throw new Error(error.message);
+    }
+
+    console.log('Upsert successful:', data);
     return data;
   }
 );

@@ -1,4 +1,3 @@
-// DashboardRenderer.jsx
 import React, {
   useEffect,
   useMemo,
@@ -33,12 +32,14 @@ function DashboardRenderer({ dashboardId, screenSize = 'desktop' }) {
   const dispatch = useDispatch();
   const mountedRef = useRef(true);
   const [isInitialLoad, setIsInitialLoad] = useState(true);
+  const [currentLayout, setCurrentLayout] = useState([]);
   const executionQueueRef = useRef(new Set());
   const executionInProgressRef = useRef(false);
   const lastExecutionTimeRef = useRef({});
   const initialLoadCompletedRef = useRef(false);
+  const dragStateRef = useRef({ isDragging: false, lastUpdate: null });
 
-  // Create memoized selectors based on dashboardId and screenSize.
+  // Create memoized selectors based on dashboardId and screenSize
   const dashboardWidgetsSelector = useMemo(
     () => selectWidgetsForDashboard(dashboardId),
     [dashboardId]
@@ -48,7 +49,7 @@ function DashboardRenderer({ dashboardId, screenSize = 'desktop' }) {
     [screenSize]
   );
 
-  // Use the dashboard widgets selector.
+  // Use the dashboard widgets selector
   const widgets = useSelector(
     (state) => {
       try {
@@ -68,10 +69,10 @@ function DashboardRenderer({ dashboardId, screenSize = 'desktop' }) {
     _.isEqual
   );
 
-  // Use the execution statuses selector.
+  // Use the execution statuses selector
   const widgetStatuses = useSelector(selectExecutionStatuses, _.isEqual);
 
-  // Use the locations selector.
+  // Use the locations selector
   const relevantLocations = useSelector(
     (state) => {
       try {
@@ -83,6 +84,28 @@ function DashboardRenderer({ dashboardId, screenSize = 'desktop' }) {
     },
     _.isEqual
   );
+
+  // Initialize currentLayout when relevantLocations load
+  useEffect(() => {
+    if (relevantLocations.length > 0 && (!currentLayout || currentLayout.length === 0)) {
+      const initialLayout = widgets.map((widget) => {
+        const loc = relevantLocations.find((row) => row.widget_id === widget.id);
+        if (loc) {
+          return {
+            i: widget.id.toString(),
+            x: parseInt(loc.x),
+            y: parseInt(loc.y),
+            w: parseInt(loc.width),
+            h: parseInt(loc.height),
+            static: !!loc.config?.pinned,
+          };
+        }
+        return null;
+      }).filter(Boolean);
+      
+      setCurrentLayout(initialLayout);
+    }
+  }, [relevantLocations, widgets, currentLayout]);
 
   useEffect(() => {
     console.log('[DashboardRenderer] Component mounted');
@@ -214,22 +237,65 @@ function DashboardRenderer({ dashboardId, screenSize = 'desktop' }) {
     }
   }, [widgets, widgetStatuses, processQueue]);
 
+  const updateLocation = useCallback((item, existingLoc) => {
+    if (!mountedRef.current) return;
+
+    // Log location update
+    console.log('Updating location:', {
+      x: item.x,
+      y: item.y,
+      w: item.w,
+      h: item.h
+    });
+
+    dispatch(
+      upsertWidgetLocation({
+        id: existingLoc?.id,
+        widget_id: item.i,
+        screen_size: screenSize,
+        x: parseInt(item.x),
+        y: parseInt(item.y),
+        width: parseInt(item.w),
+        height: parseInt(item.h),
+        config: {
+          ...(existingLoc?.config || {}),
+          pinned: item.static
+        }
+      })
+    );
+  }, [dispatch, screenSize]);
+
   const layout = useMemo(() => {
     if (!widgets?.length) return [];
+    
     return widgets.map((widget, index) => {
       const loc = relevantLocations.find(
         (row) => row.widget_id === widget.id
       );
+      
+      // First try to use current layout if it exists
+      const currentItem = currentLayout.find(item => item.i === widget.id.toString());
+      
+      if (currentItem) {
+        return {
+          ...currentItem,
+          static: loc?.config?.pinned || false
+        };
+      }
+      
+      // Fall back to location from database
       if (loc) {
         return {
           i: widget.id.toString(),
-          x: loc.x,
-          y: loc.y,
-          w: loc.width,
-          h: loc.height,
+          x: parseInt(loc.x),
+          y: parseInt(loc.y),
+          w: parseInt(loc.width),
+          h: parseInt(loc.height),
           static: !!loc.config?.pinned,
         };
       }
+      
+      // Default layout if nothing else exists
       return {
         i: widget.id.toString(),
         x: (index * 4) % 12,
@@ -239,44 +305,78 @@ function DashboardRenderer({ dashboardId, screenSize = 'desktop' }) {
         static: false,
       };
     });
-  }, [widgets, relevantLocations]);
+  }, [widgets, relevantLocations, currentLayout]);
 
   const onLayoutChange = useCallback(
     (newLayout) => {
       if (!mountedRef.current) return;
-      newLayout.forEach((item) => {
-        const existingLoc = relevantLocations.find(
-          (l) => l.widget_id === item.i
-        );
-        dispatch(
-          upsertWidgetLocation({
-            id: existingLoc?.id,
-            widget_id: item.i,
-            screen_size: screenSize,
-            x: item.x,
-            y: item.y,
-            width: item.w,
-            height: item.h,
-            config: { pinned: !!item.static },
-          })
-        );
-      });
+
+      // Log layout change
+      console.log('Layout changed:', newLayout);
+
+      // Update local layout state immediately
+      setCurrentLayout(newLayout.map(item => ({
+        ...item,
+        x: parseInt(item.x),
+        y: parseInt(item.y),
+        w: parseInt(item.w),
+        h: parseInt(item.h)
+      })));
+      
+      // Only update database if not currently dragging
+      if (!dragStateRef.current.isDragging) {
+        newLayout.forEach(item => {
+          const existingLoc = relevantLocations.find(
+            l => l.widget_id === item.i
+          );
+          updateLocation(item, existingLoc);
+        });
+      } else {
+        // Store the latest layout for when drag ends
+        dragStateRef.current.lastUpdate = newLayout;
+      }
     },
-    [dispatch, relevantLocations, screenSize]
+    [relevantLocations, updateLocation]
   );
+
+  const onDragStart = useCallback(() => {
+    dragStateRef.current.isDragging = true;
+  }, []);
+
+  const onDragStop = useCallback(() => {
+    const { lastUpdate } = dragStateRef.current;
+    dragStateRef.current.isDragging = false;
+
+    if (lastUpdate) {
+      lastUpdate.forEach(item => {
+        const existingLoc = relevantLocations.find(
+          l => l.widget_id === item.i
+        );
+        updateLocation(item, existingLoc);
+      });
+      dragStateRef.current.lastUpdate = null;
+    }
+  }, [relevantLocations, updateLocation]);
 
   const togglePin = useCallback(
     (widgetId) => {
       if (!mountedRef.current) return;
-      const updatedLayout = layout.map((item) => {
+
+      const updatedLayout = currentLayout.map(item => {
         if (item.i === widgetId.toString()) {
-          return { ...item, static: !item.static };
+          const newItem = { ...item, static: !item.static };
+          const existingLoc = relevantLocations.find(
+            l => l.widget_id === widgetId
+          );
+          updateLocation(newItem, existingLoc);
+          return newItem;
         }
         return item;
       });
-      onLayoutChange(updatedLayout);
+
+      setCurrentLayout(updatedLayout);
     },
-    [layout, onLayoutChange]
+    [currentLayout, relevantLocations, updateLocation]
   );
 
   if (isInitialLoad) {
@@ -285,7 +385,7 @@ function DashboardRenderer({ dashboardId, screenSize = 'desktop' }) {
 
   return (
     <div className="w-full h-full absolute inset-0">
-      <div className="bg-gray-50  h-full border border-gray-200 rounded">
+      <div className="bg-gray-50 h-full border border-gray-200 rounded">
         <GridLayout
           className="layout"
           layout={layout}
@@ -294,21 +394,31 @@ function DashboardRenderer({ dashboardId, screenSize = 'desktop' }) {
           width={1200}
           margin={[10, 10]}
           onLayoutChange={onLayoutChange}
+          onDragStart={onDragStart}
+          onDragStop={onDragStop}
           draggableHandle=".drag-handle"
+          isDraggable={true}
+          isResizable={true}
+          preventCollision={true}     // Change to true to prevent overlap
+          compactType={null}         // Change to null to prevent automatic compacting
+          verticalCompact={false}    // Disable vertical compacting
+          useCSSTransforms={true}
         >
           {layout.map((item) => {
-            const pinned = !!item.static;
+            const widget = widgets.find(w => w.id.toString() === item.i);
+            if (!widget) return null;
+            
             return (
               <div
                 key={item.i}
                 className={`group rounded shadow-sm ${
-                  pinned ? 'bg-orange-100' : 'bg-gray-100'
+                  item.static ? 'bg-orange-100' : 'bg-gray-100'
                 }`}
               >
                 <div className="w-full h-full p-2 relative flex flex-col">
                   <div
                     className={`drag-handle w-full h-6 ${
-                      pinned ? '' : 'cursor-move'
+                      item.static ? 'cursor-not-allowed' : 'cursor-move'
                     }`}
                   />
                   <div className="flex-1 bg-white rounded p-2 overflow-auto">
@@ -320,7 +430,7 @@ function DashboardRenderer({ dashboardId, screenSize = 'desktop' }) {
                       size="icon"
                       onClick={() => togglePin(item.i)}
                     >
-                      {pinned ? (
+                      {item.static ? (
                         <PinOff className="w-4 h-4" />
                       ) : (
                         <Pin className="w-4 h-4" />
