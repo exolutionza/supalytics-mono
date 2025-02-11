@@ -76,9 +76,9 @@ const WidgetSwitcher = ({ widgetId }) => {
     return <ErrorState error={error} />;
   }
 
-  if (isStreaming || status === 'executing') {
-    return <LoadingState />;
-  }
+  // if (isStreaming || status === 'executing') {
+  //   return <LoadingState />;
+  // }
 
   // Render appropriate widget type
   switch (widget.type) {

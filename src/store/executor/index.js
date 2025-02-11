@@ -114,12 +114,16 @@ export const executeWidget = createAsyncThunk(
 
               case 'row':
                 if (message.payload.data) {
+                  // Handle array of rows from batch
+                  const rows = Array.isArray(message.payload.data) ? message.payload.data : [message.payload.data];
+                  const rowOrder = rows.map(() => rowIndex++);
+                  
                   thunkAPI.dispatch(
                     processDataBatch({
                       widgetId,
                       batch: {
-                        rows: [message.payload.data],
-                        rowOrder: [rowIndex++]
+                        rows,
+                        rowOrder
                       }
                     })
                   );
