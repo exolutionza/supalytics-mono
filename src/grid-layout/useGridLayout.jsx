@@ -1,54 +1,62 @@
-import { useState, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useRef } from 'react';
 
 /**
- * Each item in `layout`:
- * {
- *   id: string | number,
- *   x: number,
- *   y: number,
- *   w: number,
- *   h: number,
- *   static?: boolean // pinned or not
- * }
+ * Custom hook that manages a grid layout with drag/resize,
+ * keeping local state in sync with a parent-provided initialLayout.
+ * 
+ * @param {Array} initialLayout - The array of widget layout items from the parent
+ * @param {Object} options - Configuration for the grid (cols, rowHeight, margin)
+ * @param {Function} onLayoutChange - Callback to notify parent of layout changes
  */
-export default function useGridLayout(initialLayout, options = {}) {
+export default function useGridLayout(initialLayout, options = {}, onLayoutChange) {
   const { cols = 12, rowHeight = 30, margin = [10, 10] } = options;
 
+  // Local state, initialized from the parent prop
   const [layout, setLayout] = useState(initialLayout);
 
-  // Track dragging and resizing
+  // Keep the local layout in sync with any external changes to initialLayout
+  useEffect(() => {
+    setLayout(initialLayout);
+  }, [initialLayout]);
+
+  // Notify parent whenever our local layout changes
+  useEffect(() => {
+    if (typeof onLayoutChange === 'function') {
+      onLayoutChange(layout);
+    }
+  }, [layout, onLayoutChange]);
+
+  // Refs for tracking dragging/resizing
   const draggingItemRef = useRef(null);
   const resizeItemRef = useRef(null);
-
-  // Mouse offset + item’s initial position/size
   const mouseOffsetRef = useRef({ x: 0, y: 0 });
   const itemStartRef = useRef({ x: 0, y: 0, w: 0, h: 0 });
 
   // Collision detection
-  const itemsCollide = (a, b) =>
-    !(
+  const itemsCollide = useCallback((a, b) => {
+    return !(
       a.x + a.w <= b.x ||
       a.x >= b.x + b.w ||
       a.y + a.h <= b.y ||
       a.y >= b.y + b.h
     );
+  }, []);
 
   const getCollisions = useCallback(
     (currentLayout, moving) =>
       currentLayout.filter(
         (it) => it.id !== moving.id && itemsCollide(it, moving)
       ),
-    []
+    [itemsCollide]
   );
 
   const pushDown = useCallback(
     (draftLayout, movingItem) => {
       const collided = getCollisions(draftLayout, movingItem);
       collided.forEach((colItem) => {
-        if (colItem.static) return; // skip pinned items
-
+        if (colItem.static) return;
         const oldY = colItem.y;
-        colItem.y = movingItem.y + movingItem.h; // push below
+        colItem.y = movingItem.y + movingItem.h;
         if (colItem.y !== oldY) {
           draftLayout = pushDown(draftLayout, colItem);
         }
@@ -77,7 +85,6 @@ export default function useGridLayout(initialLayout, options = {}) {
     [pushDown]
   );
 
-  // Clamp horizontally within cols (no vertical limit)
   const clampItem = useCallback(
     (it) => {
       if (it.x < 0) it.x = 0;
@@ -88,18 +95,19 @@ export default function useGridLayout(initialLayout, options = {}) {
     [cols]
   );
 
-  // ---------------------------------------
   // DRAG
-  // ---------------------------------------
   const onMouseDownDrag = useCallback((e, id) => {
     e.preventDefault();
     e.stopPropagation();
 
-    const rect = e.currentTarget?.getBoundingClientRect?.();
+    const rect = e.currentTarget.getBoundingClientRect?.();
     if (!rect) return;
 
     draggingItemRef.current = id;
-    mouseOffsetRef.current = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+    mouseOffsetRef.current = {
+      x: e.clientX - rect.left,
+      y: e.clientY - rect.top,
+    };
 
     setLayout((prev) => {
       const item = prev.find((i) => i.id === id);
@@ -121,6 +129,7 @@ export default function useGridLayout(initialLayout, options = {}) {
       setLayout((prev) => {
         const idx = prev.findIndex((i) => i.id === id);
         if (idx < 0) return prev;
+
         let newLayout = [...prev];
         let item = { ...newLayout[idx] };
 
@@ -135,16 +144,14 @@ export default function useGridLayout(initialLayout, options = {}) {
         return newLayout;
       });
     },
-    [clampItem, margin, resolveCollisions, rowHeight]
+    [rowHeight, margin, clampItem, resolveCollisions]
   );
 
   const onMouseUpDrag = useCallback(() => {
     draggingItemRef.current = null;
   }, []);
 
-  // ---------------------------------------
   // RESIZE
-  // ---------------------------------------
   const onMouseDownResize = useCallback((e, id) => {
     e.preventDefault();
     e.stopPropagation();
@@ -187,7 +194,6 @@ export default function useGridLayout(initialLayout, options = {}) {
         item.w = newW;
         item.h = newH;
 
-        // clamp horizontally
         if (item.x + item.w > cols) {
           item.w = cols - item.x;
         }
@@ -204,9 +210,7 @@ export default function useGridLayout(initialLayout, options = {}) {
     resizeItemRef.current = null;
   }, []);
 
-  // ---------------------------------------
   // PIN
-  // ---------------------------------------
   const togglePin = useCallback((id) => {
     setLayout((prev) =>
       prev.map((it) =>
@@ -226,6 +230,6 @@ export default function useGridLayout(initialLayout, options = {}) {
     togglePin,
     cols,
     rowHeight,
-    margin
+    margin,
   };
 }

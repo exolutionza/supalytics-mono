@@ -1,9 +1,9 @@
 // store/slices/widgetsSlice.js
 import { createSlice, createAsyncThunk, createEntityAdapter } from '@reduxjs/toolkit';
 import { supabase } from '@/services/supabase-client';
-import _ from 'lodash';
 
 const widgetsAdapter = createEntityAdapter({
+  selectId: (widget) => widget.id,
   sortComparer: (a, b) => a.name.localeCompare(b.name),
 });
 
@@ -11,8 +11,21 @@ const widgetsInitialState = widgetsAdapter.getInitialState({
   loading: false,
   error: null,
   runtime: {},
-  // Map of widget -> [variable_ids]
   paramDependencies: {}
+});
+
+const createInitialRuntime = () => ({
+  isStreaming: false,
+  status: null,
+  isExecuted: false,
+  rows: [],
+  rowOrder: [],
+  metadata: null,
+  receivedRows: 0,
+  error: null,
+  batchCount: 0,
+  summary: null,
+  lastUsedParams: {}
 });
 
 export const fetchWidgetsForDashboard = createAsyncThunk(
@@ -27,11 +40,9 @@ export const fetchWidgetsForDashboard = createAsyncThunk(
   }
 );
 
-// Fetch widget_templates for the same dashboard
 export const fetchWidgetTemplatesForDashboard = createAsyncThunk(
   'widgets/fetchTemplatesForDashboard',
   async (dashboardId) => {
-    // Example: sub-select all widgets in this dashboard, then fetch related templates.
     const { data: widgetsData, error: widgetsErr } = await supabase
       .from('widgets')
       .select('id')
@@ -46,7 +57,7 @@ export const fetchWidgetTemplatesForDashboard = createAsyncThunk(
       .in('widget_id', widgetIds);
 
     if (error) throw new Error(error.message);
-    return data; // array of { id, widget_id, variable_id, variable_key, ... }
+    return data;
   }
 );
 
@@ -56,96 +67,100 @@ const widgetsSlice = createSlice({
   reducers: {
     resetWidgetRuntime(state, action) {
       const widgetId = action.payload;
-      state.runtime[widgetId] = {
-        isStreaming: false,
-        rows: [],
-        rowOrder: [],
-        metadata: null,
-        receivedRows: 0,
-        error: null,
-        batchCount: 0,
-        summary: null,
-        lastUsedParams: {}
-      };
+      state.runtime[widgetId] = createInitialRuntime();
+      console.log(`Widget ${widgetId} runtime reset`);
     },
+    
     processDataBatch(state, action) {
       const { widgetId, batch } = action.payload;
-      const rt = state.runtime[widgetId] || {
-        isStreaming: true,
-        rows: [],
-        rowOrder: [],
-        metadata: null,
-        receivedRows: 0,
-        error: null,
-        batchCount: 0,
-        summary: null,
-        lastUsedParams: {}
-      };
+      const rt = state.runtime[widgetId] || createInitialRuntime();
+      
       rt.rows.push(...batch.rows);
       rt.rowOrder.push(...batch.rowOrder);
       rt.receivedRows += batch.rows.length;
       rt.batchCount++;
       state.runtime[widgetId] = rt;
+      
+      console.log(`Widget ${widgetId} processed batch:`, batch);
     },
+    
     setWidgetMetadata(state, action) {
       const { widgetId, metadata } = action.payload;
       if (!state.runtime[widgetId]) {
-        state.runtime[widgetId] = {
-          isStreaming: true,
-          rows: [],
-          rowOrder: [],
-          metadata: null,
-          receivedRows: 0,
-          error: null,
-          batchCount: 0,
-          summary: null,
-          lastUsedParams: {}
-        };
+        state.runtime[widgetId] = createInitialRuntime();
       }
       state.runtime[widgetId].metadata = metadata;
     },
+    
     setWidgetComplete(state, action) {
       const { widgetId, summary } = action.payload;
-      const rt = state.runtime[widgetId];
-      if (rt) {
-        rt.isStreaming = false;
-        rt.summary = summary;
+      if (!state.runtime[widgetId]) {
+        state.runtime[widgetId] = createInitialRuntime();
       }
+      state.runtime[widgetId] = {
+        ...state.runtime[widgetId],
+        isStreaming: false,
+        status: 'complete',
+        isExecuted: true,
+        summary
+      };
     },
+    
     setWidgetError(state, action) {
       const { widgetId, error } = action.payload;
-      const rt = state.runtime[widgetId];
-      if (rt) {
-        rt.isStreaming = false;
-        rt.error = error;
+      if (!state.runtime[widgetId]) {
+        state.runtime[widgetId] = createInitialRuntime();
       }
+      state.runtime[widgetId] = {
+        ...state.runtime[widgetId],
+        isStreaming: false,
+        status: 'error',
+        isExecuted: false,
+        error
+      };
     },
+    
     setWidgetStreamingStatus(state, action) {
-      const { widgetId, isStreaming } = action.payload;
-      if (state.runtime[widgetId]) {
-        state.runtime[widgetId].isStreaming = isStreaming;
+      const { widgetId, isStreaming, status, isExecuted } = action.payload;
+      
+      // Ensure runtime state exists
+      if (!state.runtime[widgetId]) {
+        state.runtime[widgetId] = createInitialRuntime();
       }
+      
+      // Log previous state for debugging
+      console.log(`[Widget ${widgetId}] Previous streaming state:`, {
+        isStreaming: state.runtime[widgetId].isStreaming,
+        status: state.runtime[widgetId].status,
+        isExecuted: state.runtime[widgetId].isExecuted
+      });
+      
+      // Update with new state while preserving other fields
+      state.runtime[widgetId] = {
+        ...state.runtime[widgetId],
+        isStreaming: isStreaming ?? false,
+        status: status || state.runtime[widgetId].status,
+        isExecuted: isExecuted ?? state.runtime[widgetId].isExecuted
+      };
+      
+      // Log new state for debugging
+      console.log(`[Widget ${widgetId}] New streaming state:`, {
+        isStreaming: state.runtime[widgetId].isStreaming,
+        status: state.runtime[widgetId].status,
+        isExecuted: state.runtime[widgetId].isExecuted
+      });
+      console.log(`Widget ${widgetId} streaming status updated:`, { isStreaming, status, isExecuted });
     },
+    
     setWidgetLastUsedParams(state, action) {
       const { widgetId, lastUsedParams } = action.payload;
       if (!state.runtime[widgetId]) {
-        state.runtime[widgetId] = {
-          isStreaming: false,
-          rows: [],
-          rowOrder: [],
-          metadata: null,
-          receivedRows: 0,
-          error: null,
-          batchCount: 0,
-          summary: null,
-          lastUsedParams: {}
-        };
+        state.runtime[widgetId] = createInitialRuntime();
       }
       state.runtime[widgetId].lastUsedParams = lastUsedParams;
     },
-    // Store widget dependency info
+    
     setWidgetDependencies(state, action) {
-      // Payload: { [widgetId]: [varId1, varId2, ...], ... }
       state.paramDependencies = action.payload;
     },
   },
@@ -158,19 +173,9 @@ const widgetsSlice = createSlice({
       .addCase(fetchWidgetsForDashboard.fulfilled, (state, action) => {
         state.loading = false;
         widgetsAdapter.setAll(state, action.payload);
-        // Initialize runtime for each widget
         action.payload.forEach((widget) => {
-          state.runtime[widget.id] = {
-            isStreaming: false,
-            rows: [],
-            rowOrder: [],
-            metadata: null,
-            receivedRows: 0,
-            error: null,
-            batchCount: 0,
-            summary: null,
-            lastUsedParams: {}
-          };
+          state.runtime[widget.id] = createInitialRuntime();
+          console.log(`Widget ${widget.id} initialized`);
         });
       })
       .addCase(fetchWidgetsForDashboard.rejected, (state, action) => {
@@ -178,14 +183,13 @@ const widgetsSlice = createSlice({
         state.error = action.error.message;
       })
       .addCase(fetchWidgetTemplatesForDashboard.fulfilled, (state, action) => {
-        const templates = action.payload; // array of widget_templates rows
+        const templates = action.payload;
         const depMap = {};
         templates.forEach((t) => {
           const wId = t.widget_id;
           if (!depMap[wId]) {
             depMap[wId] = [];
           }
-          // Avoid duplicates if multiple param references
           if (!depMap[wId].includes(t.variable_id)) {
             depMap[wId].push(t.variable_id);
           }
@@ -213,6 +217,17 @@ export const {
 // Export reducer
 export const widgetsReducer = widgetsSlice.reducer;
 
+// Debug helper
+export const logWidgetState = (state, widgetId) => {
+  const runtime = state.widgets.runtime[widgetId];
+  console.log(`[Widget ${widgetId}] Current state:`, {
+    isStreaming: runtime?.isStreaming,
+    status: runtime?.status,
+    isExecuted: runtime?.isExecuted,
+    error: runtime?.error
+  });
+};
+
 // Export selectors
 export const {
   selectAll: selectAllWidgets,
@@ -220,5 +235,18 @@ export const {
   selectEntities: selectWidgetEntities,
 } = widgetsAdapter.getSelectors((state) => state.widgets);
 
-// Export adapter if needed
+// Custom selectors
+export const selectWidgetRuntime = (state, widgetId) => 
+  state.widgets.runtime[widgetId] || createInitialRuntime();
+
+export const selectWidgetStreamingStatus = (state, widgetId) => {
+  const runtime = selectWidgetRuntime(state, widgetId);
+  return {
+    isStreaming: runtime.isStreaming,
+    status: runtime.status,
+    isExecuted: runtime.isExecuted
+  };
+};
+
+// Export adapter
 export { widgetsAdapter };

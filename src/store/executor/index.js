@@ -1,26 +1,19 @@
-// executeWidget.js
-
+// executor.js
 import { createAsyncThunk } from '@reduxjs/toolkit';
 import _ from 'lodash';
-import { websocketService } from '@/services/websocket-service';
-
-// Import pieces from our slices
+import { websocketService } from './websocket';
 import {
   setWidgetMetadata,
   setWidgetComplete,
   setWidgetError,
   setWidgetStreamingStatus,
   setWidgetLastUsedParams,
+  processDataBatch,
+  resetWidgetRuntime,
 } from '@/store/slices/widgets';
-
 import { updateGlobalOutput } from '@/store/slices/global-outputs';
+import { serializeOutputData, serializeWidgetParams } from './serializers';
 
-// Import the serialization logic
-import { serializeOutputData } from './serializers';
-
-/**
- * If you want a function to gather raw param data for comparison:
- */
 function gatherRawParams(widgetId, state) {
   const widgetTemplates = state.templates?.byWidget?.[widgetId] ?? [];
   const { globalOutputs } = state;
@@ -38,168 +31,249 @@ function gatherRawParams(widgetId, state) {
 
 function pickIndexed(obj, idx) {
   if (Array.isArray(obj)) return obj[idx];
-  return obj; // or something more robust
+  return obj;
 }
 
-/**
- * Instead of scanning ALL widgets, we only re-execute
- * the ones that depend on the changed variables.
- */
-function reexecuteIfNeeded(thunkAPI, finishedWidgetId, changedVariableIds = []) {
-  const state = thunkAPI.getState();
-  const { widgets } = state;
-  const { paramDependencies, runtime } = widgets;
-
-  // paramDependencies: { [widgetId]: [varId1, varId2, ...] }
-  const widgetsToCheck = new Set();
-
-  changedVariableIds.forEach((varId) => {
-    // For each widget => varIdList
-    for (const [wId, varIdList] of Object.entries(paramDependencies || {})) {
-      if (varIdList.includes(varId)) {
-        widgetsToCheck.add(wId);
-      }
+// Safe cleanup function
+function safeCleanup(cleanup) {
+  try {
+    if (typeof cleanup === 'function') {
+      cleanup();
     }
-  });
-
-  widgetsToCheck.forEach((widgetId) => {
-    if (widgetId === finishedWidgetId) return; // skip the just-finished widget
-
-    const rt = runtime[widgetId];
-    if (!rt) return;
-
-    const newParams = gatherRawParams(widgetId, state);
-    const oldParams = rt.lastUsedParams || {};
-
-    if (!_.isEqual(newParams, oldParams)) {
-      thunkAPI.dispatch(executeWidget({ widgetId }));
-    }
-  });
+  } catch (error) {
+    console.error('[Executor] Error during cleanup:', error);
+  }
 }
 
-/**
- * The main thunk that runs a query over WebSocket
- */
 export const executeWidget = createAsyncThunk(
   'widgets/executeWidget',
   async ({ widgetId }, thunkAPI) => {
+    let cleanup = null;
+    let rowIndex = 0;
+    let isFinished = false;
+    
     try {
       const state = thunkAPI.getState();
       const widget = state.widgets.entities[widgetId];
+      
       if (!widget) {
-        return thunkAPI.rejectWithValue({ error: 'Widget not found' });
+        throw new Error('Widget not found');
       }
 
-      // Gather raw params for storing in lastUsedParams
+      // Check if widget is already executing
+      const widgetRuntime = state.widgets.runtime[widgetId];
+      if (widgetRuntime?.isStreaming) {
+        console.log(`[Executor] Widget ${widgetId} is already streaming, skipping execution`);
+        return;
+      }
+
+      console.log(`[Executor] Starting execution for widget ${widgetId}`);
+
+      // Reset widget state before starting
+      thunkAPI.dispatch(resetWidgetRuntime(widgetId));
+
+      // Set initial streaming status
+      thunkAPI.dispatch(setWidgetStreamingStatus({ 
+        widgetId, 
+        isStreaming: true,
+        status: 'executing',
+        isExecuted: false
+      }));
+
+      // Gather and serialize params
       const rawParams = gatherRawParams(widgetId, state);
+      const serializedParams = serializeWidgetParams(widgetId, state);
 
-      // Also create serialized params for sending
-      const widgetTemplates = state.templates?.byWidget?.[widgetId] ?? [];
-      if (!widgetTemplates.length) {
-        return thunkAPI.rejectWithValue({ error: 'No templates for widget' });
-      }
-
-      const serializedParams = {};
-      widgetTemplates.forEach((t) => {
-        const outputData = state.globalOutputs[t.variable_id];
-        serializedParams[t.variable_key || t.variable_id] =
-          serializeOutputData(outputData, t);
-      });
-
-      // Store the rawParams in runtime
+      // Store the rawParams
       thunkAPI.dispatch(
         setWidgetLastUsedParams({ widgetId, lastUsedParams: rawParams })
       );
 
-      // Connect & execute (WebSocket endpoint is just an example)
-      const socket = await websocketService.connect(`/api/execute/${widget.id}`);
-      socket.send(
-        JSON.stringify({
-          type: 'EXECUTE_REQUEST',
-          payload: {
-            queryId: widget.query_id,
-            parameters: serializedParams
-          }
-        })
-      );
+      // Generate a unique stream ID
+      const streamId = `widget-${widgetId}-${Date.now()}`;
 
-      socket.onmessage = (event) => {
-        const message = JSON.parse(event.data);
-        switch (message.type) {
-          case 'METADATA':
-            thunkAPI.dispatch(
-              setWidgetMetadata({
-                widgetId,
-                metadata: {
-                  columns: message.payload.columns,
-                  columnOrder: message.payload.columns.map((c) => c.name),
-                  totalRows: message.payload.totalRows
+      return await new Promise((resolve, reject) => {
+        const handleMessage = (message) => {
+          if (isFinished) {
+            console.log(`[Executor] Ignoring message after completion for widget ${widgetId}`);
+            return;
+          }
+
+          try {
+            console.log(`[Executor] Received message type: ${message.type} for widget ${widgetId}`);
+            
+            switch (message.type) {
+              case 'metadata':
+                thunkAPI.dispatch(
+                  setWidgetMetadata({
+                    widgetId,
+                    metadata: message.payload.metadata
+                  })
+                );
+                break;
+
+              case 'row':
+                if (message.payload.data) {
+                  thunkAPI.dispatch(
+                    processDataBatch({
+                      widgetId,
+                      batch: {
+                        rows: [message.payload.data],
+                        rowOrder: [rowIndex++]
+                      }
+                    })
+                  );
                 }
-              })
-            );
-            break;
+                break;
 
-          case 'COMPLETE': {
-            thunkAPI.dispatch(
-              setWidgetComplete({ widgetId, summary: message.payload })
-            );
+              case 'complete':
+                isFinished = true;
+                console.log(`[Executor] Widget ${widgetId} execution completed`);
+                
+                // Update widget state
+                thunkAPI.dispatch(setWidgetComplete({ 
+                  widgetId,
+                  summary: message.payload
+                }));
 
-            // ---------------------------------------------------------------------------------
-            // TODO:
-            // Suppose the backend includes some keys in message.payload (e.g., "foo", "bar")
-            // that you want to store in globalOutputs. We'll compare old vs. new values.
-            // If they differ, we do updateGlobalOutput(...) and add them to changedVars.
-            // ---------------------------------------------------------------------------------
-            const changedVars = [];
-            const globalOutputsState = thunkAPI.getState().globalOutputs;
+                // Ensure streaming is stopped
+                thunkAPI.dispatch(setWidgetStreamingStatus({ 
+                  widgetId, 
+                  isStreaming: false,
+                  status: 'complete',
+                  isExecuted: true
+                }));
 
-              // Now re-check only widgets that depend on any changed variables
-            if (changedVars.length > 0) {
-              reexecuteIfNeeded(thunkAPI, widgetId, changedVars);
+                // Clear global output
+                thunkAPI.dispatch(updateGlobalOutput({
+                  widgetId,
+                  data: null
+                }));
+
+                safeCleanup(cleanup);
+                cleanup = null;
+
+                resolve(message.payload);
+                break;
+
+              case 'error':
+                isFinished = true;
+                console.error(`[Executor] Widget ${widgetId} execution error:`, message.payload.error);
+                
+                // Set error state
+                thunkAPI.dispatch(setWidgetError({ 
+                  widgetId, 
+                  error: message.payload.error 
+                }));
+
+                // Ensure streaming is stopped
+                thunkAPI.dispatch(setWidgetStreamingStatus({ 
+                  widgetId, 
+                  isStreaming: false,
+                  status: 'error',
+                  isExecuted: false
+                }));
+
+                safeCleanup(cleanup);
+                cleanup = null;
+
+                reject(new Error(message.payload.error));
+                break;
+
+              case 'status':
+                if (!isFinished && message.payload.status !== 'complete') {
+                  thunkAPI.dispatch(setWidgetStreamingStatus({ 
+                    widgetId, 
+                    isStreaming: true,
+                    status: message.payload.status,
+                    isExecuted: false
+                  }));
+                }
+                break;
+
+              default:
+                console.warn(`[Executor] Unhandled message type: ${message.type}`);
+                break;
             }
-
-            socket.close();
-            break;
+          } catch (error) {
+            console.error('[Executor] Error handling message:', error);
+            if (!isFinished) {
+              isFinished = true;
+              safeCleanup(cleanup);
+              cleanup = null;
+              reject(error);
+            }
           }
+        };
 
-          // case 'BATCH':
-          //   thunkAPI.dispatch(
-          //     processDataBatch({
-          //       widgetId,
-          //       batch: {
-          //         rows: message.payload.rows,
-          //         rowOrder:
-          //           message.payload.rowOrder ||
-          //           message.payload.rows.map((_, idx) => idx)
-          //       }
-          //     })
-          //   );
-          //   break;
+        try {
+          // Execute query using websocket service and check returned cleanup
+          const result = websocketService.executeQuery(
+            'ws://localhost:8080/ws',
+            widget.query_id,
+            serializedParams,
+            streamId,
+            handleMessage
+          );
+
+          // Save cleanup function if one was returned
+          if (typeof result === 'function') {
+            cleanup = result;
+          } else if (result && typeof result.cleanup === 'function') {
+            cleanup = result.cleanup;
+          } else {
+            console.warn('[Executor] No cleanup function returned from websocket service');
+          }
+        } catch (error) {
+          console.error(`[Executor] Failed to execute widget ${widgetId}:`, error);
           
-          case 'ERROR':
-            thunkAPI.dispatch(
-              setWidgetError({ widgetId, error: message.payload.error })
-            );
-            socket.close();
-            break;
+          thunkAPI.dispatch(setWidgetError({ 
+            widgetId, 
+            error: error.message 
+          }));
+
+          thunkAPI.dispatch(setWidgetStreamingStatus({ 
+            widgetId, 
+            isStreaming: false,
+            status: 'error',
+            isExecuted: false
+          }));
+
+          reject(error);
         }
-      };
 
-      socket.onerror = () => {
-        thunkAPI.dispatch(
-          setWidgetError({ widgetId, error: 'WebSocket connection error' })
-        );
-      };
+        // Handle thunk abortion
+        thunkAPI.signal.addEventListener('abort', () => {
+          console.log(`[Executor] Widget ${widgetId} execution aborted`);
+          
+          isFinished = true;
+          safeCleanup(cleanup);
+          cleanup = null;
 
-      socket.onclose = () => {
-        thunkAPI.dispatch(
-          setWidgetStreamingStatus({ widgetId, isStreaming: false })
-        );
-      };
+          thunkAPI.dispatch(setWidgetStreamingStatus({ 
+            widgetId, 
+            isStreaming: false,
+            status: 'aborted',
+            isExecuted: false
+          }));
 
-      return { widgetId, status: 'streaming' };
+          reject(new Error('Widget execution aborted'));
+        });
+      });
+
     } catch (error) {
-      return thunkAPI.rejectWithValue({ error: error.message });
+      console.error(`[Executor] Unhandled error executing widget ${widgetId}:`, error);
+      
+      thunkAPI.dispatch(setWidgetStreamingStatus({ 
+        widgetId, 
+        isStreaming: false,
+        status: 'error',
+        isExecuted: false
+      }));
+
+      throw error;
+    } finally {
+      safeCleanup(cleanup);
     }
   }
 );

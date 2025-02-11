@@ -45,6 +45,7 @@ const LandingPage = lazyImport(() => import('./pages/landing'));
 const GridLayout = lazyImport(() => import('./grid-layout'));
 import DashboardPage from './renderer/dashboard';
 import ChartsDemoPage from './renderer/widgets/chart-renderer/test';
+import ConnectorsPage from './pages/connectors';
 
 // Protected route wrapper without additional Suspense
 const Protected = ({ children }) => (
@@ -60,6 +61,7 @@ const AppRoutes = () => {
           <Route path="/grid" element={<GridLayout />} />
           <Route path="/dashboard/:id" element={<DashboardPage />} />
           <Route path="/chart" element={<ChartsDemoPage/>} />
+          <Route path="/connectors" element={<ConnectorsPage/>} />
 
           <Route path="/signin" element={<SignIn />} />
           <Route path="/signup" element={<SignUp />} />

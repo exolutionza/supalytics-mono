@@ -1,87 +1,166 @@
-// store/selectors.js
-import { createSelector } from '@reduxjs/toolkit';
+// selectors.js
+import { createSelector, createSelectorCreator, lruMemoize } from 'reselect';
+import isEqual from 'lodash/isEqual';
 import { selectAllWidgets, selectWidgetById } from './slices/widgets';
 import { selectAllDashboards, selectDashboardById } from './slices/dashboards';
+import { selectAllWidgetLocations } from './slices/widget-locations';
 
-/**
- * Custom Combined Selectors
- * ------------------------
- * These build upon the base selectors from individual slices
- */
+/** Base Selectors **/
+export const selectWidgetsRuntime = (state) =>
+  (state.widgets && state.widgets.runtime) || {};
 
-export const selectWidgetsForDashboard = (dashboardId) =>
-  createSelector(
-    selectAllWidgets,
-    (widgets) => widgets.filter((widget) => widget.dashboard_id === dashboardId)
-  );
+export const selectWidgetsEntities = (state) =>
+  (state.widgets && state.widgets.entities) || {};
 
-export const selectWidgetFullData = (widgetId) =>
-  createSelector(
-    (state) => selectWidgetById(state, widgetId),
-    (state) => state.widgets.runtime[widgetId],
+/** Widget Data Selectors **/
+export const createWidgetFullDataSelector = (widgetId) => {
+  // Input selectors: extract widget and its runtime data.
+  const widgetSelector = (state) => selectWidgetById(state, widgetId);
+  const runtimeSelector = (state) =>
+    selectWidgetsRuntime(state)[widgetId] || null;
+  // Combine into a new object.
+  return createSelector(
+    [widgetSelector, runtimeSelector],
     (widget, runtime) => ({ widget, runtime })
   );
+};
 
-export const selectWidgetOrderedData = (widgetId) =>
-  createSelector(
-    selectWidgetFullData(widgetId),
-    ({ runtime }) => {
-      if (!runtime?.rows || !runtime?.metadata?.columnOrder) {
-        return null;
-      }
-      const orderedRows = runtime.rowOrder.map(idx => runtime.rows[idx]);
+/**
+ * createWidgetOrderedDataSelector – returns widget data with columns obtained solely from metadata.
+ * If no metadata columns are provided, returns an empty columns array.
+ */
+export const createWidgetOrderedDataSelector = (widgetId) => {
+  const fullDataSelector = createWidgetFullDataSelector(widgetId);
+  return createSelector([fullDataSelector], ({ runtime }) => {
+    if (!runtime || !runtime.rows) {
+      console.debug(
+        `[Selector] Widget ${widgetId} returning default empty data (no runtime or rows)`
+      );
       return {
-        rows: orderedRows,
-        columns: runtime.metadata.columnOrder,
+        rows: [],
+        columns: [],
+        isStreaming: runtime ? runtime.isStreaming : false,
+        batchCount: runtime ? runtime.batchCount : 0,
+        error: runtime ? runtime.error : null,
+        summary: runtime ? runtime.summary : null,
+      };
+    }
+    // Get columns only from metadata.
+    const columns =
+      runtime.metadata && runtime.metadata.columns;
+
+    if (!columns) {
+      console.debug(
+        `[Selector] Widget ${widgetId} returning default empty data (no columns)`
+      );
+      return {
+        rows: [],
+        columns: [],
         isStreaming: runtime.isStreaming,
         batchCount: runtime.batchCount,
         error: runtime.error,
-        summary: runtime.summary
+        summary: runtime.summary,
       };
     }
-  );
+    // Map rows using the provided metadata columns.
+    const mappedRows = runtime.rowOrder.map((idx) => {
+      const rowArray = runtime.rows[idx];
+      return columns.reduce((acc, col, colIndex) => {
+        acc[col] = rowArray[colIndex];
+        return acc;
+      }, {});
+    });
+    console.log("RUNTIME ROWS: ", mappedRows, columns);
 
-export const selectWidgetProgress = (widgetId) =>
-  createSelector(
-    selectWidgetFullData(widgetId),
-    ({ runtime }) => ({
-      totalRows: runtime?.metadata?.totalRows ?? 0,
-      receivedRows: runtime?.receivedRows ?? 0,
-      progress: runtime?.metadata?.totalRows
+    return {
+      rows: mappedRows,
+      columns,
+      isStreaming: runtime.isStreaming,
+      batchCount: runtime.batchCount,
+      error: runtime.error,
+      summary: runtime.summary,
+    };
+  });
+};
+
+export const createWidgetProgressSelector = (widgetId) => {
+  const fullDataSelector = createWidgetFullDataSelector(widgetId);
+  return createSelector([fullDataSelector], ({ runtime }) => ({
+    totalRows:
+      (runtime && runtime.metadata && runtime.metadata.totalRows) || 0,
+    receivedRows: (runtime && runtime.receivedRows) || 0,
+    progress:
+      runtime && runtime.metadata && runtime.metadata.totalRows
         ? (runtime.receivedRows / runtime.metadata.totalRows) * 100
         : 0,
-      isComplete: runtime?.receivedRows === runtime?.metadata?.totalRows,
-      isStreaming: runtime?.isStreaming ?? false
-    })
-  );
+    isComplete:
+      runtime &&
+      runtime.metadata &&
+      runtime.metadata.totalRows != null &&
+      runtime.receivedRows === runtime.metadata.totalRows,
+    isStreaming: (runtime && runtime.isStreaming) || false,
+  }));
+};
 
-export const selectWidgetMetadata = (widgetId) =>
+export const createWidgetStreamingStatusSelector = (widgetId) => {
+  const fullDataSelector = createWidgetFullDataSelector(widgetId);
+  return createSelector([fullDataSelector], ({ runtime }) => ({
+    isStreaming: (runtime && runtime.isStreaming) || false,
+    batchCount: (runtime && runtime.batchCount) || 0,
+    hasError: !!(runtime && runtime.error),
+    error: (runtime && runtime.error) || null,
+    hasData:
+      runtime &&
+      runtime.rows &&
+      Array.isArray(runtime.rows) &&
+      runtime.rows.length > 0,
+    totalRows:
+      (runtime && runtime.metadata && runtime.metadata.totalRows) || 0,
+    receivedRows: (runtime && runtime.receivedRows) || 0,
+    isExecuted: runtime !== null,
+  }));
+};
+
+/** Dashboard Selectors **/
+// Use deep equality for memoization.
+const createDeepEqualSelector = createSelectorCreator(lruMemoize, isEqual);
+export const selectDashboardWidgets = (dashboardId) =>
+  createDeepEqualSelector(
+    [selectAllWidgets],
+    (widgets) => widgets.filter((widget) => widget.dashboard_id === dashboardId)
+  );
+export const selectWidgetsForDashboard = selectDashboardWidgets;
+
+export const selectExecutionStatuses = createSelector(
+  [selectWidgetsRuntime],
+  (runtime) => {
+    const statuses = {};
+    Object.keys(runtime).forEach((widgetId) => {
+      const widgetRuntime = runtime[widgetId];
+      statuses[widgetId] = {
+        isExecuted: !!widgetRuntime,
+        isStreaming:
+          widgetRuntime && widgetRuntime.isStreaming
+            ? widgetRuntime.isStreaming
+            : false,
+        hasError: !!(widgetRuntime && widgetRuntime.error),
+      };
+    });
+    return statuses;
+  }
+);
+
+/** Location Selectors **/
+export const selectRelevantLocations = (screenSize) =>
   createSelector(
-    selectWidgetFullData(widgetId),
-    ({ runtime }) => runtime?.metadata ?? null
+    [selectAllWidgetLocations],
+    (locations = []) => locations.filter((loc) => loc.screen_size === screenSize)
   );
 
-export const selectWidgetStreamingStatus = (widgetId) =>
-  createSelector(
-    selectWidgetFullData(widgetId),
-    ({ runtime }) => ({
-      isStreaming: runtime?.isStreaming ?? false,
-      batchCount: runtime?.batchCount ?? 0,
-      hasError: !!runtime?.error,
-      error: runtime?.error ?? null,
-      hasData: (runtime?.rows?.length ?? 0) > 0,
-      totalRows: runtime?.metadata?.totalRows ?? 0,
-      receivedRows: runtime?.receivedRows ?? 0
-    })
-  );
-
-// Re-export base selectors for convenience
-export {
-  selectAllWidgets,
-  selectWidgetById,
-} from './slices/widgets';
-
-export {
-  selectAllDashboards,
-  selectDashboardById
-} from './slices/dashboards';
+/** Safe Selectors **/
+export const safeSelectAllWidgets = (state) => selectAllWidgets(state) || [];
+export const safeSelectWidgetById = (state, id) =>
+  selectWidgetById(state, id) || null;
+export const safeSelectAllDashboards = (state) => selectAllDashboards(state) || [];
+export const safeSelectDashboardById = (state, id) =>
+  selectDashboardById(state, id) || null;

@@ -78,15 +78,36 @@ export const SerializerTypes = {
   export function serializeOutputData(outputData, template) {
     try {
       if (!outputData) return '';
-      
-      // Get value using index if specified
-      const value = template.index != null
+
+      let value = outputData
+      if (template?.index) {
+        value = template.index != null
         ? findValueByIndex(outputData, template.index)
         : outputData;
-        
-      return serialize(value, template.type || SerializerTypes.RAW);
+      }      
+
+      return serialize(value, template?.type || SerializerTypes.RAW);
     } catch (error) {
       console.error('Serialization error:', error);
       return '';
     }
+  }
+
+  export function serializeWidgetParams(widgetId, state) {
+    const rawParams = {};
+    const widgetTemplates = state.templates?.byWidget?.[widgetId] ?? [];
+    const { globalOutputs } = state;
+  
+    widgetTemplates.forEach((template) => {
+      const paramName = template.variable_key || template.variable_id;
+      let value = globalOutputs[template.variable_id];
+  
+      if (template.index != null) {
+        value = findValueByIndex(value, template.index);
+      }
+  
+      rawParams[paramName] = serialize(value, template.type || SerializerTypes.RAW);
+    });
+  
+    return rawParams;
   }

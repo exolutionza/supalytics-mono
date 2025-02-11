@@ -5,7 +5,7 @@ import Dashboard from './renderer';  // Adjust the import path as needed
 const DashboardPage = () => {
   const { id } = useParams();
   const [screenSize, setScreenSize] = useState('desktop');
-
+  console.log("dsasdsad")
   useEffect(() => {
     // Function to determine screen size
     const getScreenSize = () => {

@@ -23,6 +23,7 @@ function generateRandomPosition(widget, existingLocations) {
   const height = widget.height || DEFAULT_WIDGET_HEIGHT;
   const maxX = Math.max(0, GRID_WIDTH - width);
   
+  // Try random positions first
   for (let i = 0; i < 50; i++) {
     const x = Math.floor(Math.random() * maxX);
     const y = Math.floor(Math.random() * (MAX_Y_POSITION - TOP_MARGIN)) + TOP_MARGIN;
@@ -33,9 +34,24 @@ function generateRandomPosition(widget, existingLocations) {
     }
   }
   
+  // If random positions fail, try systematic placement
+  for (let y = TOP_MARGIN; y < MAX_Y_POSITION; y++) {
+    for (let x = 0; x <= maxX; x++) {
+      const position = { x, y, width, height };
+      if (!checkOverlap(position, existingLocations)) {
+        return position;
+      }
+    }
+  }
+  
+  // If all else fails, stack at the bottom
+  const maxExistingY = existingLocations.length > 0
+    ? Math.max(...existingLocations.map(loc => loc.y + loc.height))
+    : TOP_MARGIN;
+    
   return {
-    x: Math.floor(Math.random() * maxX),
-    y: TOP_MARGIN,
+    x: 0,
+    y: maxExistingY,
     width,
     height
   };
@@ -91,10 +107,9 @@ export const fetchWidgetLocations = createAsyncThunk(
       const locationsMap = new Map(existingLocations?.map(loc => [loc.widget_id, loc]) || []);
       const results = [...(existingLocations || [])];
 
-      // Generate and insert new locations for widgets without them
-      const newLocationsPromises = widgets
-        .filter(widget => !locationsMap.has(widget.id))
-        .map(async (widget) => {
+      // Process widgets sequentially to ensure no overlap
+      for (const widget of widgets) {
+        if (!locationsMap.has(widget.id)) {
           const position = generateRandomPosition(widget, results);
           const newLocation = {
             widget_id: widget.id,
@@ -110,16 +125,16 @@ export const fetchWidgetLocations = createAsyncThunk(
 
           if (insertError) {
             console.error(`Failed to insert location for widget ${widget.id}:`, insertError);
-            return null;
+            continue;
           }
 
-          return data;
-        });
-
-      const newLocations = await Promise.all(newLocationsPromises);
+          if (data) {
+            results.push(data);
+          }
+        }
+      }
       
-      // Filter out null values from failed insertions and combine with existing locations
-      return [...results, ...newLocations.filter(Boolean)];
+      return results;
     } catch (error) {
       console.error('Error in fetchWidgetLocations:', error);
       throw error;
@@ -127,7 +142,6 @@ export const fetchWidgetLocations = createAsyncThunk(
   }
 );
 
-// Rest of the code remains the same
 export const upsertWidgetLocation = createAsyncThunk(
   'widgetLocations/upsertWidgetLocation',
   async (location) => {

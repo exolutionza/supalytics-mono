@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"time"
 
 	driver "supalytics-executor/driver"
@@ -135,37 +134,43 @@ func (d *Driver) Query(ctx context.Context, query string, args ...interface{}) (
 
 // streamResults returns a RowStream that first yields the header (columns)
 // once (with a nil row) and then yields each row with nil columns.
+// streamResults streams rows from pgx, converts each value using our helper, and yields the rows.
 func (d *Driver) streamResults(ctx context.Context, rows pgx.Rows) driver.RowStream {
+	// Obtain the type map from the pgx connection.
+	tm := rows.Conn().TypeMap()
+
 	return func(yield func(columns []string, row []interface{}) error) error {
 		defer rows.Close()
 
-		// Get schema (field descriptions) and build the header.
+		// Get the field descriptions.
 		fields := rows.FieldDescriptions()
+
+		// Build header using field names (names are []byte, so convert to string).
 		header := make([]string, len(fields))
-		for i, field := range fields {
-			header[i] = string(field.Name)
+		for i, fd := range fields {
+			header[i] = string(fd.Name)
 		}
 
-		// Yield the header once.
+		// Yield header.
 		if err := yield(header, nil); err != nil {
-			if err == io.EOF {
-				return nil
-			}
 			return err
 		}
 
-		// Stream rows.
+		// Process each row.
 		for rows.Next() {
 			values, err := rows.Values()
 			if err != nil {
 				return fmt.Errorf("failed to read row: %w", err)
 			}
 
-			// Yield nil for columns (header already sent) and send row values.
-			if err := yield(nil, values); err != nil {
-				if err == io.EOF {
-					return nil
-				}
+			// Convert row values using our helper.
+			converted, err := ConvertRowValues(fields, values, tm)
+			if err != nil {
+				return err
+			}
+
+			// Yield the converted row.
+			if err := yield(nil, converted); err != nil {
 				return err
 			}
 		}

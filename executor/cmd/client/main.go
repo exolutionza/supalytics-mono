@@ -16,18 +16,37 @@ const (
 	MessageTypeRow      MessageType = "row"
 	MessageTypeError    MessageType = "error"
 	MessageTypeComplete MessageType = "complete"
+	MessageTypeStatus   MessageType = "status"
 )
 
 // WSMessage represents the standardized message format
 type WSMessage struct {
-	Type    MessageType            `json:"type"`
-	Payload map[string]interface{} `json:"payload,omitempty"`
+	Type     MessageType            `json:"type"`
+	StreamID string                 `json:"streamId"`
+	Payload  map[string]interface{} `json:"payload,omitempty"`
 }
 
 // QueryRequest represents the JSON structure sent to the server
 type QueryRequest struct {
 	QueryID      string                 `json:"queryId"`
+	StreamID     string                 `json:"streamId"`
 	TemplateData map[string]interface{} `json:"templateData"`
+}
+
+func executeQuery(conn *websocket.Conn, queryID string, streamID string, templateData map[string]interface{}) {
+	// Prepare the query request
+	req := QueryRequest{
+		QueryID:      queryID,
+		StreamID:     streamID,
+		TemplateData: templateData,
+	}
+
+	// Send the query request
+	if err := conn.WriteJSON(req); err != nil {
+		log.Printf("Error sending query request for stream %s: %v", streamID, err)
+		return
+	}
+	log.Printf("Sent query request for stream %s: %+v", streamID, req)
 }
 
 func main() {
@@ -40,25 +59,24 @@ func main() {
 	}
 	defer conn.Close()
 
-	// Prepare the query request
-	req := QueryRequest{
-		QueryID: "aec65753-66e0-473a-aabb-edcfc7a16421",
-		TemplateData: map[string]interface{}{
-			"Con": "connectors",
-		},
+	// Template data for our queries
+	templateData := map[string]interface{}{
+		"Con": "connectors",
 	}
 
-	// Send the query request
-	if err := conn.WriteJSON(req); err != nil {
-		log.Fatalf("Error sending query request: %v", err)
-	}
-	log.Printf("Sent query request: %+v", req)
+	// Execute first query
+	executeQuery(conn, "aec65753-66e0-473a-aabb-edcfc7a16421", "stream1", templateData)
+
+	// Execute second query after a short delay
+	// time.Sleep(2 * time.Second)
+	executeQuery(conn, "aec65753-66e0-473a-aabb-edcfc7a16421", "stream2", templateData)
+
+	// Track completion of both streams
+	completedStreams := make(map[string]bool)
+	var totalRows int64
 
 	// Set read deadline
 	conn.SetReadDeadline(time.Now().Add(60 * time.Second))
-
-	var totalRows int64
-	var metadata map[string]interface{}
 
 	// Read and process messages
 	for {
@@ -69,31 +87,50 @@ func main() {
 			break
 		}
 
+		// Log the stream ID with each message
+		streamLog := func(format string, args ...interface{}) {
+			newArgs := make([]interface{}, len(args)+1)
+			newArgs[0] = msg.StreamID
+			copy(newArgs[1:], args)
+			log.Printf("[Stream %s] "+format, newArgs...)
+		}
+
 		switch msg.Type {
 		case MessageTypeMetadata:
-			metadata = msg.Payload
-			log.Printf("Received metadata: %v", metadata)
+			streamLog("Received metadata: %v", msg.Payload)
 
 		case MessageTypeRow:
 			if data, ok := msg.Payload["data"].([]interface{}); ok {
-				log.Printf("Received row: %v", data)
+				streamLog("Received row: %v", data)
 			}
 
 		case MessageTypeError:
 			if errMsg, ok := msg.Payload["error"].(string); ok {
-				log.Printf("Error received: %s", errMsg)
+				streamLog("Error received: %s", errMsg)
 			}
-			return
+			completedStreams[msg.StreamID] = true
 
 		case MessageTypeComplete:
 			if total, ok := msg.Payload["totalRows"].(float64); ok {
-				totalRows = int64(total)
-				log.Printf("Query complete. Total rows: %d", totalRows)
+				rows := int64(total)
+				totalRows += rows
+				streamLog("Query complete. Stream rows: %d", rows)
 			}
-			return
+			completedStreams[msg.StreamID] = true
+
+		case MessageTypeStatus:
+			if status, ok := msg.Payload["status"].(string); ok {
+				streamLog("Status update: %s", status)
+			}
 
 		default:
-			log.Printf("Unknown message type: %s", msg.Type)
+			streamLog("Unknown message type: %s", msg.Type)
+		}
+
+		// Check if both streams are complete
+		if len(completedStreams) == 2 {
+			log.Printf("All streams complete. Total rows across streams: %d", totalRows)
+			return
 		}
 	}
 }
