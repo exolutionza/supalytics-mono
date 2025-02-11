@@ -60,16 +60,17 @@ func main() {
 	defer conn.Close()
 
 	// Template data for our queries
-	templateData := map[string]interface{}{
+	templateData1 := map[string]interface{}{
 		"Con": "connectors",
 	}
-
+	// Template data for our queries
+	templateData2 := map[string]interface{}{}
 	// Execute first query
-	executeQuery(conn, "aec65753-66e0-473a-aabb-edcfc7a16421", "stream1", templateData)
+	executeQuery(conn, "aec65753-66e0-473a-aabb-edcfc7a16421", "stream1", templateData1)
 
 	// Execute second query after a short delay
 	// time.Sleep(2 * time.Second)
-	executeQuery(conn, "aec65753-66e0-473a-aabb-edcfc7a16421", "stream2", templateData)
+	executeQuery(conn, "df279904-9271-4e7c-87f5-76ff5ee23bb9", "stream2", templateData2)
 
 	// Track completion of both streams
 	completedStreams := make(map[string]bool)

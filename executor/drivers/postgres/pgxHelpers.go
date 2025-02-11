@@ -80,12 +80,10 @@ func ConvertRowValues(fields []pgconn.FieldDescription, values []interface{}, ty
 // It supports values that are []byte, string, or a [16]uint8 array.
 func convertUUID(val interface{}) (interface{}, error) {
 	// Print out the type for debugging purposes.
-	fmt.Printf("Raw value: %#v\n", val)
-	fmt.Printf("Raw type: %T\n", val)
+
 	var uuidStr string
 	switch v := val.(type) {
 	case []byte:
-		fmt.Println("Matched []byte")
 		// If the byte slice is exactly 16 bytes, treat it as a binary UUID.
 		if len(v) == 16 {
 			var u uuid.UUID
@@ -98,7 +96,7 @@ func convertUUID(val interface{}) (interface{}, error) {
 	case [16]byte:
 		return uuid.UUID(v), nil
 	default:
-		fmt.Println("Falling back to default case")
+		// fmt.Println("Falling back to default case")
 		uuidStr = fmt.Sprintf("%v", v)
 	}
 	parsed, err := uuid.Parse(uuidStr)

@@ -4,7 +4,7 @@ import { store } from '@/store/store'; // Add this import (adjust path as needed
 import { BrowserRouter as Router, Routes, Route, useNavigate, useLocation } from 'react-router-dom';
 import { AuthProvider } from './context/auth-context';
 import AppRoutes from './routes';
-import { Toaster } from "@/components/ui/toaster";
+// import { Toaster } from "@/components/ui/toaster";
 import { ThemeProvider } from '@/components/theme-provider';
 
 // Wrapper component that provides navigation functionality
@@ -19,7 +19,6 @@ const AuthWrapper = () => {
     >
       <ThemeProvider defaultTheme="light" storageKey="vite-ui-theme">
         <AppRoutes />
-        <Toaster />
       </ThemeProvider>
     </AuthProvider>
   );

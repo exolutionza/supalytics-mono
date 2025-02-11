@@ -284,11 +284,8 @@ function DashboardRenderer({ dashboardId, screenSize = 'desktop' }) {
   }
 
   return (
-    <div className="p-6">
-      <h2 className="text-xl font-semibold mb-4">
-        Dashboard {dashboardId} ({screenSize})
-      </h2>
-      <div className="bg-gray-50 border border-gray-200 rounded">
+    <div className="w-full h-full absolute inset-0">
+      <div className="bg-gray-50  h-full border border-gray-200 rounded">
         <GridLayout
           className="layout"
           layout={layout}

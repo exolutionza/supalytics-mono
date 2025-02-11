@@ -29,7 +29,7 @@ const (
 	pingPeriod = (pongWait * 9) / 10
 
 	// Maximum message size allowed from peer
-	maxMessageSize = 512 * 1024 // 512KB
+	maxMessageSize = 64 * 1024 * 1024 // 512KB was original
 )
 
 // MessageType represents different types of messages sent to the client
